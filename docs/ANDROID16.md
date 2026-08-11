@@ -169,6 +169,18 @@ name (`a9_eink_socket`), no error, features just stop working:
 Running v3.x against the May daemon breaks the brightness/temperature slider
 (`smb` absent) and pins the shader index (`stl` absent).
 
+**A screen lock delays the whole service after every reboot.** With a PIN or
+fingerprint set, user 0 stays credential-locked until you authenticate, and
+Android will not run non-`directBootAware` apps in that state. Until the first
+unlock: a9service does not start, the accessibility service never binds
+(`dumpsys accessibility` shows `Bound services:{}` while still listing it under
+Enabled), `am start` reports "Activity class ... does not exist", and `/sdcard`
+is not writable. So AOD, refresh modes and the e-ink button all appear broken,
+and it looks exactly like a bad build. The tell is
+`Failed to find provider info for ... (user not unlocked)` in logcat.
+Nothing to fix in the ROM -- but marking the service `directBootAware` would be
+a legitimate improvement.
+
 **`unshare_blocks` is mandatory.** GSIs ship deduplicated blocks;
 `mount -o loop,rw` fails outright until `e2fsck -E unshare_blocks` has run.
 
