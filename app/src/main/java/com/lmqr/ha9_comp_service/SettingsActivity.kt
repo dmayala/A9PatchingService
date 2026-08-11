@@ -76,8 +76,28 @@ class SettingsActivity : AppCompatActivity() {
             preferenceManager.sharedPreferences?.toggle("aod_image_updated")
         }
 
+        // Show only the settings belonging to the selected AOD mode. Both sets
+        // exist in the XML; the unused one is hidden rather than merely disabled,
+        // because a greyed-out block of ten irrelevant options is just noise.
+        private fun updateAodSections() {
+            val staticAod =
+                preferenceManager.sharedPreferences?.getBoolean("disable_overlay_aod", false) ?: false
+            findPreference<Preference>("cat_aod_static")?.isVisible = staticAod
+            findPreference<Preference>("cat_aod_overlay")?.isVisible = !staticAod
+        }
+
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.root_preferences, rootKey)
+
+            updateAodSections()
+            (findPreference("disable_overlay_aod") as Preference?)?.setOnPreferenceChangeListener { _, newValue ->
+                // isVisible has to be applied against the NEW value: the listener
+                // runs before the preference is persisted, so reading it back here
+                // would give the old one.
+                findPreference<Preference>("cat_aod_static")?.isVisible = newValue as Boolean
+                findPreference<Preference>("cat_aod_overlay")?.isVisible = !newValue
+                true
+            }
 
             (findPreference("select_aod_bg") as Preference?)?.onPreferenceClickListener =
                 Preference.OnPreferenceClickListener {
