@@ -40,6 +40,33 @@ def patch_OverrideAnimatorScale(instruction):
     ])
     keep_scale_count += 1
 
+# Makes the AOD mode switchable at RUNTIME instead of at build time.
+#
+# Replaces every read of DisplayPowerController.mColorFadeEnabled with a read of
+# the system property "debug.a9.colorfade":
+#     1 -> ColorFade runs  -> MODE 1: panel retains your last screen, plus the
+#                             moon/pause glyph (needs A9_PATCH_COLORFADE too, and
+#                             sys.linevibrator_type set to a passthrough index).
+#     0 -> ColorFade off   -> MODE 2: the a9service overlay AOD (clock / chess /
+#                             battery / music) is what the panel latches.
+#
+# debug.* is used because SELinux lets a plain adb shell write it; persist.sys.*
+# and sys.* are both denied (measured). Set the boot default from vndk.rc:
+#     setprop debug.a9.colorfade 0
+# and toggle live with:
+#     adb shell setprop debug.a9.colorfade 1   # moon / last screen
+#     adb shell setprop debug.a9.colorfade 0   # chess / clock overlay
+# The change takes effect on the next screen-off; no reboot needed.
+def patch_ColorFadeEnabledFromProp(instruction):
+    registers = instruction.get_n_free_registers(2)
+    instruction.expand_before([
+        f'const-string {registers[0]}, "debug.a9.colorfade"',
+        f'const/4 {registers[1]}, 0x0',
+        f'invoke-static {{{registers[0]}, {registers[1]}}}, Landroid/os/SystemProperties;->getBoolean(Ljava/lang/String;Z)Z',
+        f'move-result {registers[0]}',
+    ])
+    instruction.replace(f'move {instruction.registers[0]}, {registers[0]}')
+
 def patch_services_jar():
     def add_pattern_to_initrc(property_name, property_value, pattern_seq, pattern_loop, do_open=False):
         with open("../d/system/etc/init/vndk.rc", "a") as init_file:
@@ -1046,7 +1073,10 @@ def patch_services_jar():
                 # SurfaceFlinger actually presents -- the overlay -- is retained.
                 # That is how this behaved on Android 14.
                 #
-                # Mutually exclusive with A9_PATCH_COLORFADE (the v3.x shader AOD).
+                # NOT mutually exclusive with A9_PATCH_COLORFADE any more: build
+                # with BOTH and the image carries the 96-variant shader list for
+                # mode 1 *and* runtime control over whether ColorFade runs at all,
+                # so the two AOD modes are switchable with a setprop.
                 file_patterns = ([r"DisplayPowerController[0-9]*\.smali"]
                                  if os.environ.get("A9_DISABLE_COLORFADE") == "1" else []),
                 patches = [
@@ -1056,7 +1086,7 @@ def patch_services_jar():
                             field_name = "mColorFadeEnabled",
                             data_type = "Z",
                         ),
-                        action = lambda inst: inst.replace(f"const/4 {inst.registers[0]}, 0x0"),
+                        action = patch_ColorFadeEnabledFromProp,
                     ),
                 ],
             ),
