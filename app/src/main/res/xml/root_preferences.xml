@@ -149,4 +149,30 @@
             android:max="100"/>
     </PreferenceCategory>
 
+
+    <PreferenceCategory app:title="Overlay AOD (clock / chess / battery)">
+
+        <SwitchPreferenceCompat
+            app:key="disable_overlay_aod"
+            app:disableDependentsState="true"
+            app:summary="Disable the drawn AOD and fall back to the static lockscreen icon"
+            app:title="Disable Overlay AOD" />
+
+        <SwitchPreferenceCompat
+            app:dependency="disable_overlay_aod"
+            app:key="overlay_chess"
+            app:summary="Enable chess replays on AOD"
+            app:title="Chess AOD" />
+
+        <ListPreference
+            app:dependency="disable_overlay_aod"
+            app:key="music_view_timeout"
+            app:title="Set Timeout for MusicView Visibility"
+            app:summary="Time after which MusicView should disappear if the music is paused but the session still exists (in minutes)"
+            app:entries="@array/mv_timeout_options"
+            app:entryValues="@array/mv_timeout_values"
+            app:defaultValue="-1" />
+
+    </PreferenceCategory>
+
 </PreferenceScreen>

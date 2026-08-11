@@ -46,6 +46,7 @@ class A9AccessibilityService : AccessibilityService(),
     private lateinit var staticAODOpacityManager: StaticAODOpacityManager
     private lateinit var sharedPreferences: SharedPreferences
     private lateinit var buttonActionManager: ButtonActionManager
+    private lateinit var alwaysOnDisplay: AlwaysOnDisplay
     private var isScreenOn = true
 
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
@@ -54,13 +55,20 @@ class A9AccessibilityService : AccessibilityService(),
                 Intent.ACTION_SCREEN_OFF -> {
                     isScreenOn = false
                     menuBinding.close()
+                    if (!sharedPreferences.getBoolean("disable_overlay_aod", false))
+                        alwaysOnDisplay.openAOD()
+                    // FORCE_CLEAR rather than SPEED_CLEAR: the overlay is only
+                    // composited after ACTION_SCREEN_OFF is delivered, so the panel
+                    // has to be told to take a NEW frame afterwards, otherwise it
+                    // keeps latching the pre-overlay one.
                     if (sharedPreferences.getBoolean("refresh_on_lock", false))
                         handler.postDelayed({
-                            commandRunner.runCommands(arrayOf(Commands.SPEED_CLEAR))
+                            commandRunner.runCommands(arrayOf(Commands.FORCE_CLEAR))
                         }, 150)
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     isScreenOn = true
+                    alwaysOnDisplay.closeAOD()
                     if (sharedPreferences.getBoolean("refresh_on_lock", false))
                         refreshModeManager.applyMode()
                 }
@@ -116,6 +124,7 @@ class A9AccessibilityService : AccessibilityService(),
         )
 
         buttonActionManager = ButtonActionManager(commandRunner)
+        alwaysOnDisplay = AlwaysOnDisplay(this)
 
         val filterScreen = IntentFilter()
         filterScreen.addAction(Intent.ACTION_SCREEN_ON)
@@ -424,6 +433,10 @@ class A9AccessibilityService : AccessibilityService(),
 
             "static_lockscreen_opacity", "static_lockscreen_type", "static_lockscreen_bg_opacity", "static_lockscreen_mix_color" -> {
                 staticAODOpacityManager.applyMode()
+            }
+
+            "overlay_chess", "aod_image_updated" -> {
+                alwaysOnDisplay.update()
             }
 
             "color_scheme_type", "color_scheme_color" -> {
