@@ -425,6 +425,10 @@ class A9AccessibilityService : AccessibilityService(),
         }
     }
 
+    // Called by PerformAODExtraButtonAction: advances the AOD extra view
+    // (e.g. plays the next chess move) without waking the device.
+    fun performAODAction() = alwaysOnDisplay.performExtraAction()
+
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
         when (key) {
             "override_max_brightness" -> {
