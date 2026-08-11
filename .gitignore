@@ -14,3 +14,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# A16 port working files
+app/external_scripts/system_img_patcher/TMP/
+app/external_scripts/system_img_patcher/__pycache__/
+app/external_scripts/system_img_patcher/system_patched.img
+app/external_scripts/system_img_patcher/patch-report.json
+app/external_scripts/system_img_patcher/*.bak

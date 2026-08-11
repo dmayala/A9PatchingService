@@ -10,6 +10,10 @@ from typing import List, Callable, Optional, Any
 from dataclasses import dataclass
 from enum import Enum, auto
 
+# A16 PORT INSTRUMENTATION: every FilePatch records how many times it actually
+# fired, so patches that silently stopped matching are visible at the end.
+PATCH_REPORT = []
+
 class MatchStrategy(Enum):
     ANY = auto()
     EXACT = auto()
@@ -182,7 +186,11 @@ class JarPatcher:
         os.chdir('..')
 
         temp_apk_name = f"{self.file_name}-TMP.{self.file_extensions}"
-        build_command = f"apktool b {self.temp_dir_name}{' -c' if copy_meta_inf else ''}{' -api ' + str(api) if api else ''} -o {temp_apk_name}"
+        # apktool 3.x renamed -c to --copy-original and REMOVED -api entirely
+        # (dex version is now derived from the input, which is what we want on
+        # A16 - apktool 2.10.0 overflows its api->dexVersion table at api 36
+        # with "dexVersion must be within [0, 999]").
+        build_command = f"apktool b {self.temp_dir_name}{' --copy-original' if copy_meta_inf else ''}{' -api ' + str(api) if api else ''} -o {temp_apk_name}"
 
         run_command(build_command)
 
@@ -215,6 +223,13 @@ class FilePatch:
         self.patches = patches
 
     def apply(self):
+        # A16 PORT: an empty pattern list means "this group is disabled on
+        # purpose" (see the A9_PATCH_* env gates in patch_system_img.py).
+        # Skip quietly rather than reporting it as a zero-match failure.
+        if not self.file_patterns:
+            logging.warning("[DISABLED] FilePatch group skipped by configuration")
+            return
+
         patterns = [re.compile(pattern) for pattern in self.file_patterns]
         matching_files = []
 
@@ -223,34 +238,72 @@ class FilePatch:
                 if any(pattern.match(file) for pattern in patterns):
                     matching_files.append(os.path.join(root, file))
 
+        # A16 PORT INSTRUMENTATION: a renamed/moved class yields zero matching
+        # files and the original code silently did nothing. Make that loud.
+        if not matching_files:
+            logging.error(f"[ZERO-MATCH] NO FILE matched {self.file_patterns}")
+            PATCH_REPORT.append({
+                "patterns": str(self.file_patterns), "file": None,
+                "patch": None, "action": None, "fired": 0,
+            })
+            return
+
+        # Count per patch ACROSS all matching files. A pattern like
+        # AutomaticBrightnessController\S*  legitimately matches many inner
+        # classes ($1, $Injector, …) and a patch firing in only one of them is
+        # normal — reporting per-file would be almost all false alarms.
+        totals = [0] * len(self.patches)
+        names = [getattr(p.action, "__name__", "?") for p in self.patches]
+
         for file in matching_files:
             smali_file = SmaliFile(file)
 
             with open(file, 'r') as f:
                 cont_temp = f.read()
 
-            for patch in self.patches:
+            for idx, patch in enumerate(self.patches):
+                fired = [0]
+                base_action = patch.action
+
+                def action(*a, _f=fired, _b=base_action, **kw):
+                    _f[0] += 1
+                    return _b(*a, **kw)
+
                 if patch.field is not None:
                     if smali_file.smali_class:
                         for f in smali_file.smali_class.get_fields(patch.field):
-                            patch.action(f)
+                            action(f)
 
                 if patch.method is None and patch.instruction is not None:
-                    smali_file.for_instruction(patch.instruction, patch.action)
+                    smali_file.for_instruction(patch.instruction, action)
                 elif patch.instruction is None and patch.method is not None:
                     smali_file.for_method(
                         patch.method,
-                        patch.action
+                        action
                     )
                 elif patch.instruction is not None and patch.method is not None:
                     smali_file.for_method(
                         patch.method,
-                        action=lambda m: m.for_instruction(patch.instruction, patch.action)
+                        action=lambda m: m.for_instruction(patch.instruction, action)
                     )
                 elif patch.field is None:
-                    patch.action(smali_file)
+                    action(smali_file)
+
+                totals[idx] += fired[0]
 
             smali_file.save_file()
+
+        for idx, total in enumerate(totals):
+            if total == 0:
+                logging.error(
+                    f"[ZERO-MATCH] {self.file_patterns} patch#{idx} "
+                    f"({names[idx]}) never fired in any of "
+                    f"{len(matching_files)} matching file(s)"
+                )
+            PATCH_REPORT.append({
+                "patterns": str(self.file_patterns), "files": len(matching_files),
+                "patch": idx, "action": names[idx], "fired": total,
+            })
 
 class FunctionPatch:
     def __init__(self, action):

@@ -985,7 +985,18 @@ def patch_services_jar():
                 ]
             ),
             FilePatch(
-                file_patterns = [r"Vibrator(Manager)?Service\.smali"],
+                # BROKEN ON ANDROID 16 — disabled by default (2026-08-11).
+                # patch_startVibrationLocked emits
+                #   iget-object v0, p1, .../Vibration;->callerInfo:.../Vibration$CallerInfo;
+                # but A16 removed that field. The patch assembles fine and the
+                # device boots, then ANY haptic feedback (e.g. opening the app
+                # drawer) throws in system_server and soft-reboots the device:
+                #   java.lang.NoSuchFieldError: No field callerInfo of type
+                #     Lcom/android/server/vibrator/Vibration$CallerInfo;
+                #     at VibratorManagerService.startVibrationLocked
+                # Re-enable only after re-porting against A16's Vibration class.
+                file_patterns = ([r"Vibrator(Manager)?Service\.smali"]
+                                 if os.environ.get("A9_PATCH_VIBRATOR") == "1" else []),
                 patches = [
                     InstructionPatch(
                         instruction = InstructionDetails(
@@ -1018,7 +1029,53 @@ def patch_services_jar():
                 ]
             ),
             FilePatch(
-                file_patterns = [r"ColorFade\.smali"],
+                # A9_DISABLE_COLORFADE=1: force every read of
+                # DisplayPowerController.mColorFadeEnabled to false, so screen-off
+                # never prepares or draws a ColorFade layer at all.
+                #
+                # Why this exists: ColorFade SCREENSHOTS the display when the
+                # screen-off transition begins, then renders that captured
+                # texture through the shader. ACTION_SCREEN_OFF is broadcast to
+                # apps in parallel, so a9service v1.4.1 makes its AOD overlay
+                # visible AFTER the snapshot was taken -- the bistable panel then
+                # latches the snapshot (your last app screen) and never the
+                # overlay. Measured 2026-08-11: with the passthrough shader
+                # (index 47) the panel showed the last app screen + corner moon,
+                # confirming the snapshot, not the overlay, is what is retained.
+                # With ColorFade disabled there is no snapshot, so the last frame
+                # SurfaceFlinger actually presents -- the overlay -- is retained.
+                # That is how this behaved on Android 14.
+                #
+                # Mutually exclusive with A9_PATCH_COLORFADE (the v3.x shader AOD).
+                file_patterns = ([r"DisplayPowerController[0-9]*\.smali"]
+                                 if os.environ.get("A9_DISABLE_COLORFADE") == "1" else []),
+                patches = [
+                    InstructionPatch(
+                        instruction = InstructionDetails(
+                            instruction_type = InstructionType.FIELD_READ,
+                            field_name = "mColorFadeEnabled",
+                            data_type = "Z",
+                        ),
+                        action = lambda inst: inst.replace(f"const/4 {inst.registers[0]}, 0x0"),
+                    ),
+                ],
+            ),
+            FilePatch(
+                # ColorFade repaints the screen at screen-off using one of 96
+                # baked-in shader variants (moon/pause glyph, indexed by the
+                # `stl<n>` command). That IS the v3.x "static AOD".
+                #
+                # It is mutually exclusive with the v1.4.1 userspace AOD overlay
+                # (clock/date/battery/music/chess drawn as a
+                # TYPE_ACCESSIBILITY_OVERLAY): ColorFade paints over the overlay
+                # at screen-off, so you get the moon instead of the clock.
+                # Android 14 setups that showed the clock had NO framework
+                # patches at all, hence no ColorFade repaint.
+                #
+                # Set A9_PATCH_COLORFADE=1 for the v3.x moon/pause static AOD.
+                # Leave it off when pairing with a9service v1.4.1.
+                file_patterns = ([r"ColorFade\.smali"]
+                                 if os.environ.get("A9_PATCH_COLORFADE") == "1" else []),
                 patches = [
                     InstructionPatch(
                         action = patch_ColorFade
@@ -1072,7 +1129,7 @@ def patch_services_jar():
                 ],
             )
         ]
-    ).patch(api = 29)
+    ).patch()
 
 def patch_systemui():
     values_per_scrim_enum = {
@@ -1374,7 +1431,7 @@ def patch_systemui():
                 ]
             ),
         ]
-    ).patch(install = ["d/system/system_ext/priv-app/SystemUI/SystemUI.apk"], sign = True, api = 29)
+    ).patch(install = ["d/system/system_ext/priv-app/SystemUI/SystemUI.apk"], sign = True)
 
 def patch_AddTintToCall():
     namespaces = {
@@ -1412,7 +1469,7 @@ def patch_CallUI():
         [
             FunctionPatch(action=patch_AddTintToCall)
         ]
-    ).patch(sign = True, use_res = True, use_src = False, api = 29)
+    ).patch(sign = True, use_res = True, use_src = False)
 
 def update_build_prop():
     properties = {
@@ -1530,8 +1587,20 @@ def main():
     run_command('e2fsck -E unshare_blocks -y -f s-ab-raw.img')
 
     with MountImage('s-ab-raw.img', 'd'):
-        replace_file("d/system/priv-app/TrebleApp/TrebleApp.apk")
-        replace_file("d/system/product/overlay/treble-overlay-Hisense-HLTE556N.apk")
+        # These two are PRE-SIGNED with the AOSP platform test key
+        # (C8:A2:E9:BC...). On a base signed with any other platform key they
+        # are fatal: me.phh.treble.app declares a sharedUserId, so PackageManager
+        # throws during initSystemApps and system_server dies in a bootloop --
+        #   IllegalStateException: Signature mismatch on system package
+        #     me.phh.treble.app for shared user
+        # The GSI ships its own correctly-signed TrebleApp, so just leave it be.
+        # Only enable on a testkey-signed base (e.g. TrebleDroid AOSP).
+        if os.environ.get("A9_PATCH_TREBLEAPP") == "1":
+            replace_file("d/system/priv-app/TrebleApp/TrebleApp.apk")
+            replace_file("d/system/product/overlay/treble-overlay-Hisense-HLTE556N.apk")
+        else:
+            logging.warning("SKIPPING TrebleApp + treble-overlay (set A9_PATCH_TREBLEAPP=1 "
+                            "only on a testkey-signed base)")
         replace_file("d/system/bin/a9_eink_server", perms = 0o755, owner = "root:2000", secontext = "u:object_r:phhsu_exec:s0")
         replace_file("d/system/priv-app/a9service.apk")
         replace_file("d/system/priv-app/org.fdroid.fdroid.privileged.apk")
@@ -1541,14 +1610,48 @@ def main():
         replace_file("d/system/app/ims-caf-u.apk")
         replace_file("d/system/etc/hosts")
         update_build_prop()
-        try:
-            patch_CallUI()
-            pass
-        except subprocess.CalledProcessError:
-            logging.warning('Dialer app patching error, skipping.')
-        patch_systemui()
-        patch_services_jar()
+
+        # A16 PORT: SystemUI and Dialer are re-signed with the AOSP platform
+        # test keys, so they can only be patched on a testkey-signed base.
+        # They are also the patches most likely to have rotted since Android 14.
+        # Opt in explicitly with A9_PATCH_SYSTEMUI=1 / A9_PATCH_DIALER=1.
+        if os.environ.get("A9_PATCH_DIALER") == "1":
+            try:
+                patch_CallUI()
+            except subprocess.CalledProcessError:
+                logging.warning('Dialer app patching error, skipping.')
+        else:
+            logging.warning("SKIPPING Dialer patch (set A9_PATCH_DIALER=1 to enable)")
+
+        if os.environ.get("A9_PATCH_SYSTEMUI") == "1":
+            patch_systemui()
+        else:
+            logging.warning("SKIPPING SystemUI patches (set A9_PATCH_SYSTEMUI=1 to enable)")
+
+        # A9_PATCH_SERVICES=0 reproduces the pre-2024-08 "shell script" setup:
+        # build.prop + vndk.rc + a9_eink_server + a9service.apk only, with a
+        # completely stock services.jar. That is the configuration under which
+        # the a9service v1.4.1 userspace AOD (clock/battery/music/chess drawn as
+        # a TYPE_ACCESSIBILITY_OVERLAY) is known to work on Android 14.
+        # The framework display patches (DisplayPowerController screen-off path,
+        # ColorFade) were written for the v3.x system AOD and fight it.
+        if os.environ.get("A9_PATCH_SERVICES", "1") == "1":
+            patch_services_jar()
+        else:
+            logging.warning("SKIPPING ALL services.jar patches (A9_PATCH_SERVICES=0)")
+
         update_vndk_rc()
+
+    # A16 PORT: report which patches actually fired.
+    import json
+    fired = [r for r in PATCH_REPORT if r["fired"] > 0]
+    dead = [r for r in PATCH_REPORT if r["fired"] == 0]
+    logging.info(f"PATCH REPORT: {len(fired)} fired, {len(dead)} ZERO-MATCH")
+    for r in dead:
+        logging.error(f"  ZERO-MATCH  {r['patterns']}  patch#{r['patch']}  {r['action']}")
+    with open("../patch-report.json", "w") as fh:
+        json.dump(PATCH_REPORT, fh, indent=2)
+    logging.info("Wrote patch-report.json")
 
     run_command("e2fsck -f -y s-ab-raw.img || true")
     run_command("resize2fs -M s-ab-raw.img")
