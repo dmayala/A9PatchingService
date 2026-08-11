@@ -4,6 +4,11 @@ import android.content.SharedPreferences
 import com.lmqr.ha9_comp_service.command_runners.CommandRunner
 import kotlin.math.min
 
+// One past the last SHADER_LIST index (0..95). Written to sys.linevibrator_type
+// via the daemon's `stl` command to tell the patched DisplayPowerController not
+// to run ColorFade at all. See A9_DISABLE_COLORFADE in the patcher.
+const val COLORFADE_OFF_SENTINEL = 96
+
 enum class AODOpacity(val mode: Int) {
     OPAQUE( 0),
     SEMIOPAQUE(1),
@@ -73,6 +78,23 @@ class StaticAODOpacityManager(
     fun applyMode() {
         try{
             sharedPreferences.run {
+                // MODE SWITCH. The overlay AOD (clock / chess / battery / music)
+                // requires ColorFade to be OFF: ColorFade screenshots the display
+                // when screen-off begins, so the panel would latch that snapshot
+                // instead of the overlay, which is only composited afterwards.
+                //
+                // Apps cannot setprop, but the daemon can, and `stl<n>` is already
+                // a property write (sys.linevibrator_type). SENTINEL 96 is one past
+                // the 96-entry SHADER_LIST; the patched
+                // DisplayPowerController.a9ColorFadeEnabled() reads any
+                // out-of-range index as "do not run ColorFade".
+                //
+                // So: overlay AOD enabled -> 96 -> ColorFade off  (mode 2)
+                //     overlay AOD disabled -> real index -> ColorFade on (mode 1)
+                if (!getBoolean("disable_overlay_aod", false)) {
+                    commandRunner.runCommands(arrayOf("stl$COLORFADE_OFF_SENTINEL"))
+                    return
+                }
                 if(!isReader) {
                     val op =
                         if (currentOpacity == AODOpacity.NOTSET)

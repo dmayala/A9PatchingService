@@ -58,7 +58,7 @@ def patch_OverrideAnimatorScale(instruction):
 #     adb shell setprop debug.a9.colorfade 0   # chess / clock overlay
 # The change takes effect on the next screen-off; no reboot needed.
 def add_a9ColorFadeEnabled_helper(smali_file):
-    """Inject a zero-arg static helper that reads debug.a9.colorfade.
+    """Inject a zero-arg static helper deciding whether ColorFade runs.
 
     A helper is used instead of inlining the property read at each call site
     because the free registers available there are frequently above v15, and
@@ -77,10 +77,33 @@ def add_a9ColorFadeEnabled_helper(smali_file):
             '.method public static a9ColorFadeEnabled()Z',
             cls,
             initial_instructions = [
-                '.locals 2',
-                'const-string v0, "debug.a9.colorfade"',
+                '.locals 4',
+                # t = SystemProperties.getInt("sys.linevibrator_type", 0)
+                #
+                # That property is the ColorFade SHADER_LIST index, and the app
+                # sets it through the daemon's `stl<n>` command. Valid indices are
+                # 0..95; the app sends the out-of-range SENTINEL 96 to mean
+                # "overlay AOD is active, do not run ColorFade at all". This is the
+                # only channel available: apps cannot setprop, but the daemon runs
+                # as phhsu_daemon and can.
+                'const-string v0, "sys.linevibrator_type"',
                 'const/4 v1, 0x0',
-                'invoke-static {v0, v1}, Landroid/os/SystemProperties;->getBoolean(Ljava/lang/String;Z)Z',
+                'invoke-static {v0, v1}, Landroid/os/SystemProperties;->getInt(Ljava/lang/String;I)I',
+                'move-result v0',
+                # enabled = (0 <= t < 96)
+                'const/4 v2, 0x1',
+                'if-ltz v0, :a9_cf_disabled',
+                'const/16 v3, 0x60',
+                'if-ge v0, v3, :a9_cf_disabled',
+                'goto :a9_cf_default_ready',
+                ':a9_cf_disabled',
+                'const/4 v2, 0x0',
+                ':a9_cf_default_ready',
+                # debug.a9.colorfade overrides when set, else falls through to the
+                # app-driven value above. Keeps the adb escape hatch working:
+                #   adb shell setprop debug.a9.colorfade 1|0
+                'const-string v0, "debug.a9.colorfade"',
+                'invoke-static {v0, v2}, Landroid/os/SystemProperties;->getBoolean(Ljava/lang/String;Z)Z',
                 'move-result v0',
                 'return v0',
             ]

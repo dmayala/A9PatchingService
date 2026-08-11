@@ -443,6 +443,33 @@ class A9AccessibilityService : AccessibilityService(),
                 alwaysOnDisplay.update()
             }
 
+            // Single switch between the two AOD implementations.
+            //
+            // They need OPPOSITE sleep behaviour, which is why doze is set here
+            // rather than left to the user:
+            //   mode 1 (static/ColorFade) needs FULL SLEEP -- ColorFade's painted
+            //           frame must be the last thing drawn for the panel to latch it.
+            //   mode 2 (overlay AOD) needs DOZE -- the display stays in a low-power
+            //           ON state so SurfaceFlinger keeps compositing long enough for
+            //           the TYPE_ACCESSIBILITY_OVERLAY to reach the panel. On a full
+            //           screen-off, compositing stops before it is drawn.
+            // Leaving doze on in mode 1 gets you stock Android's AOD instead
+            // (black background, corner clock) which is wrong on E Ink.
+            //
+            // ColorFade itself is switched by applyMode() via the stl sentinel.
+            "disable_overlay_aod" -> {
+                val staticAod = sharedPreferences?.getBoolean("disable_overlay_aod", false) ?: false
+                val doze = if (staticAod) 0 else 1
+                try {
+                    Settings.Secure.putInt(contentResolver, "doze_always_on", doze)
+                    Settings.Secure.putInt(contentResolver, "doze_enabled", doze)
+                } catch (e: SecurityException) {
+                    // needs WRITE_SECURE_SETTINGS, i.e. the app must be in priv-app
+                    e.printStackTrace()
+                }
+                staticAODOpacityManager.applyMode()
+            }
+
             "color_scheme_type", "color_scheme_color" -> {
                 sharedPreferences?.let { updateColorScheme(it) }
             }
