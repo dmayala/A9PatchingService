@@ -1,0 +1,81 @@
+name: Build a9service.apk
+
+# Builds the accessibility-service APK and signs it with the PUBLIC AOSP
+# platform test keys, which is what makes it usable from /system/priv-app on a
+# testkey-signed GSI. Those same keys live in
+# app/external_scripts/system_img_patcher/platform.{pk8,x509.pem} and are what
+# the patcher uses to re-sign SystemUI/Dialer.
+#
+# NOTE: on a GSI whose platform is signed with some OTHER key (crDroid,
+# LineageOS maintainer keys, ...) a testkey-signed APK cannot join
+# android.uid.system. This app does not declare a sharedUserId, so it still
+# works from priv-app on those bases -- but TrebleApp does, which is why
+# replacing TrebleApp bootloops such a base. See A9_PATCH_TREBLEAPP.
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildtype:
+        description: 'Build type (debug or release)'
+        default: 'debug'
+        required: true
+  push:
+    branches: [ a16-port ]
+    paths:
+      - 'app/src/**'
+      - 'app/build.gradle.kts'
+      - '.github/workflows/build-app.yml'
+  pull_request:
+    paths:
+      - 'app/src/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build
+        run: |
+          if [ "${{ github.event.inputs.buildtype }}" = "release" ]; then
+            ./gradlew --no-daemon assembleRelease
+          else
+            ./gradlew --no-daemon assembleDebug
+          fi
+
+      - name: Fetch AOSP platform test keys
+        run: |
+          B=https://android.googlesource.com/platform/build/+/refs/heads/main/target/product/security
+          curl -L "$B/platform.pk8?format=TEXT"      | base64 -d > platform.pk8
+          curl -L "$B/platform.x509.pem?format=TEXT" | base64 -d > platform.x509.pem
+
+      - name: Zipalign and sign with platform test keys
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          echo "build-tools: $BT"
+          echo "apk: $APK"
+          "$BT/zipalign" -p -f 4 "$APK" aligned.apk
+          "$BT/apksigner" sign \
+            --key platform.pk8 --cert platform.x509.pem \
+            --out a9service.apk aligned.apk
+          "$BT/apksigner" verify --print-certs a9service.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: a9service
+          path: a9service.apk
+          if-no-files-found: error
