@@ -22,3 +22,7 @@ app/external_scripts/system_img_patcher/system_patched.img
 app/external_scripts/system_img_patcher/patch-report.json
 app/external_scripts/system_img_patcher/*.bak
 tools/bin/
+
+# never commit private keys
+keys/*.pk8
+keys/*.key

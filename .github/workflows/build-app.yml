@@ -1,16 +1,22 @@
 name: Build a9service.apk
 
-# Builds the accessibility-service APK and signs it with the PUBLIC AOSP
-# platform test keys, which is what makes it usable from /system/priv-app on a
-# testkey-signed GSI. Those same keys live in
-# app/external_scripts/system_img_patcher/platform.{pk8,x509.pem} and are what
-# the patcher uses to re-sign SystemUI/Dialer.
+# Builds the accessibility-service APK and signs it with OUR OWN key
+# (CN=Daniel), held in the repo secrets A9_SIGNING_KEY_PK8 /
+# A9_SIGNING_CERT_PEM. The public certificate is committed as
+# keys/daniel.x509.pem so builds can be verified:
+#   apksigner verify --print-certs a9service.apk
+#   -> SHA-256: c2ee5e84899e1a4b84db7d61aa7e4f47bccd403e9bff0848487a09e504f63d97
 #
-# NOTE: on a GSI whose platform is signed with some OTHER key (crDroid,
-# LineageOS maintainer keys, ...) a testkey-signed APK cannot join
-# android.uid.system. This app does not declare a sharedUserId, so it still
-# works from priv-app on those bases -- but TrebleApp does, which is why
-# replacing TrebleApp bootloops such a base. See A9_PATCH_TREBLEAPP.
+# Why not the AOSP platform test key: this app declares NO sharedUserId, so it
+# does not need to be platform-signed -- it only needs to live in priv-app to
+# get privileged permissions. Upstream signs it CN=Damian for the same reason.
+#
+# CONSEQUENCE OF FORKING: our key differs from upstream CN=Damian
+# (399f43ba3257c4aa...), so this APK CANNOT be installed as an update over a
+# Damian-signed build -- adb install fails with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE, and dropping it into /system/priv-app on
+# a device whose /data still records the old signature makes PackageManager
+# reject it. Ship it in the image AND wipe /data, or change applicationId.
 
 on:
   workflow_dispatch:
@@ -55,13 +61,19 @@ jobs:
             ./gradlew --no-daemon assembleDebug
           fi
 
-      - name: Fetch AOSP platform test keys
+      - name: Restore signing key
+        env:
+          PK8: ${{ secrets.A9_SIGNING_KEY_PK8 }}
+          PEM: ${{ secrets.A9_SIGNING_CERT_PEM }}
         run: |
-          B=https://android.googlesource.com/platform/build/+/refs/heads/main/target/product/security
-          curl -L "$B/platform.pk8?format=TEXT"      | base64 -d > platform.pk8
-          curl -L "$B/platform.x509.pem?format=TEXT" | base64 -d > platform.x509.pem
+          if [ -z "$PK8" ] || [ -z "$PEM" ]; then
+            echo "::error::A9_SIGNING_KEY_PK8 / A9_SIGNING_CERT_PEM secrets are not set"
+            exit 1
+          fi
+          printf '%s' "$PK8" | base64 -d > signing.pk8
+          printf '%s' "$PEM" | base64 -d > signing.x509.pem
 
-      - name: Zipalign and sign with platform test keys
+      - name: Zipalign and sign
         run: |
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
@@ -69,9 +81,10 @@ jobs:
           echo "apk: $APK"
           "$BT/zipalign" -p -f 4 "$APK" aligned.apk
           "$BT/apksigner" sign \
-            --key platform.pk8 --cert platform.x509.pem \
+            --key signing.pk8 --cert signing.x509.pem \
             --out a9service.apk aligned.apk
           "$BT/apksigner" verify --print-certs a9service.apk
+          rm -f signing.pk8 signing.x509.pem
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
