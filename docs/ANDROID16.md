@@ -59,7 +59,8 @@ Gotcha: index 22 draws a *white, nearly transparent* glyph — invisible on a
 white E Ink screen. Use **Black Logo on White Background** + **Opaque** icon
 opacity (index 7) to actually see it.
 
-App settings: "Disable Overlay AOD" **ON**.
+Selected by: "Disable Overlay AOD" **ON** (the app then sends the real
+shader index, re-enabling ColorFade, and turns doze off).
 
 ### mode 2 — overlay AOD: clock / chess / battery / music
 
@@ -77,26 +78,47 @@ non-obvious requirements:
    reaches the panel. On a full screen-off, compositing stops before the
    overlay is drawn. This was the single hardest thing to find.
 
-App settings: "Disable Overlay AOD" **OFF**, "Chess AOD" **ON**,
+Selected by: "Disable Overlay AOD" **OFF** (the app then sends sentinel 96,
+disabling ColorFade, and turns doze on). Also set "Chess AOD" **ON**,
 **"Refresh AOD after screen off" ON** — that one sends `FORCE_CLEAR` 150 ms
 after screen-off so the EPD takes a new frame. Its XML `defaultValue="true"`
 never applies, because the code reads it with a `false` default until the
 settings screen has been opened, so on a fresh install it is effectively OFF.
 
-If you flip only `debug.a9.colorfade` and leave doze on, you get **stock
-Android's AOD** (black background, corner clock, notification icons) — wrong on
-E Ink. Change both together.
+If doze is left on while ColorFade is enabled you get **stock Android's AOD**
+(black background, corner clock, notification icons) — wrong on E Ink. The app
+toggle handles this; only the manual `setprop` path can get it wrong.
 
 ### switching
 
+**Use the app: E-Ink Settings -> Overlay AOD -> "Disable Overlay AOD".**
+
+    OFF -> mode 2 (overlay: clock / chess / battery / music)
+    ON  -> mode 1 (static: last screen + moon/pause glyph)
+
+That one toggle drives all three things a mode change needs:
+
+| | how |
+|---|---|
+| the app's overlay | directly |
+| doze vs full sleep | the app holds `WRITE_SECURE_SETTINGS` (it is in priv-app) and writes `doze_always_on` / `doze_enabled` |
+| ColorFade | apps cannot `setprop`, but the daemon can, and `stl<n>` already is a property write. The app sends **sentinel 96** — one past the 96-entry SHADER_LIST — which the patched `a9ColorFadeEnabled()` reads as "do not run ColorFade" |
+
+Debug override, when you want to force one mode regardless of the app:
+
 ```sh
-setprop debug.a9.colorfade 1   # + doze off  -> mode 1
-setprop debug.a9.colorfade 0   # + doze on   -> mode 2
+adb shell setprop debug.a9.colorfade 1    # force ColorFade on
+adb shell setprop debug.a9.colorfade 0    # force ColorFade off
+adb shell setprop debug.a9.colorfade ""   # release; app drives again
 ```
 
-`debug.*` is used because SELinux lets a plain adb shell write it;
-`sys.*` and `persist.sys.*` are both denied. It does not survive a reboot —
-`tools/finalize-image.sh` bakes the boot default into `vndk.rc` (4th argument).
+The helper is `SystemProperties.getBoolean("debug.a9.colorfade", <sentinel>)`,
+so an explicitly-set value **always wins**. That is why
+`tools/finalize-image.sh` must NOT bake this property into `vndk.rc` — doing so
+pins the mode and the in-app toggle stops working. Its 4th argument defaults to
+empty for exactly this reason; set the boot state with the shader index instead
+(pass **96** when mode 2 is the normal state, so the first screen-off after a
+flash is already correct).
 
 ---
 
