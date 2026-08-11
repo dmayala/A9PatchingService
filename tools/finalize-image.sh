@@ -23,6 +23,8 @@
 #      moon  6 7 14 15 22 23 30 31 38 39 46 47
 #      pause 54 55 62 63 70 71 78 79 86 87 94 95
 #    Any other index deliberately fades the panel to black or white.
+#    SENTINEL 96 (one past the list) means "overlay AOD active, do not run
+#    ColorFade at all" - use it as the boot default when mode 2 is the norm.
 #
 # Also note: GSI images ship deduplicated blocks, so `mount -o loop,rw` fails
 # outright until `e2fsck -E unshare_blocks` has run. That is done here.
@@ -32,7 +34,13 @@ set -euo pipefail
 OUT="${1:?usage: finalize-image.sh out.img [shader-index] [daemon] [aod-mode]}"
 IDX="${2:-47}"
 DAEMON="${3:-}"
-MODE="${4:-0}"   # boot default for debug.a9.colorfade: 0=overlay AOD, 1=moon
+MODE="${4:-}"    # OPTIONAL hard override of debug.a9.colorfade. LEAVE EMPTY.
+                 # Empty = the app drives the mode via the stl sentinel, which
+                 # is what makes the in-app "Disable Overlay AOD" toggle work.
+                 # Setting it to 0 or 1 PINS the mode and the app can no longer
+                 # switch, because the patched helper consults
+                 # SystemProperties.getBoolean("debug.a9.colorfade", <sentinel>)
+                 # and an explicitly-set value always wins. Debug use only.
 
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 SRC="$REPO/app/external_scripts/system_img_patcher/system_patched.img"
@@ -76,10 +84,16 @@ fi
 #   0 = ColorFade off -> mode 2, a9service overlay AOD (clock/chess/battery)
 # debug.* is used because a plain adb shell can write it; sys.* and persist.sys.*
 # are SELinux-denied. debug.* does not survive a reboot, hence this line.
-if sudo grep -q "debug.a9.colorfade" "$V"; then
-  sudo sed -i "s|setprop debug.a9.colorfade .*|setprop debug.a9.colorfade $MODE|" "$V"
+# Only write the override if one was explicitly requested; otherwise strip any
+# existing line so the app-driven sentinel decides the mode.
+if [ -n "$MODE" ]; then
+  if sudo grep -q "debug.a9.colorfade" "$V"; then
+    sudo sed -i "s|setprop debug.a9.colorfade .*|setprop debug.a9.colorfade $MODE|" "$V"
+  else
+    sudo sed -i "0,/on property:sys.boot_completed=1/s||on property:sys.boot_completed=1\n    setprop debug.a9.colorfade $MODE|" "$V"
+  fi
 else
-  sudo sed -i "0,/on property:sys.boot_completed=1/s||on property:sys.boot_completed=1\n    setprop debug.a9.colorfade $MODE|" "$V"
+  sudo sed -i "/setprop debug.a9.colorfade/d" "$V"
 fi
 
 if [ -n "$DAEMON" ]; then
@@ -91,7 +105,7 @@ fi
 
 echo "--- verification ---"
 printf 'adb props    : %s/5\n' "$(sudo grep -cE '^(ro\.build\.type=userdebug|ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP")"
-printf 'aod mode     : debug.a9.colorfade=%s\n' "$MODE"
+printf 'aod override : %s\n' "${MODE:-<unset - app drives via stl sentinel>}"
 printf 'shader index : %s\n'   "$(sudo grep -oE 'setprop sys\.linevibrator_type [0-9]+' "$V" | head -1)"
 printf 'a9_eink_server: %s\n'  "$(sudo stat -c%s "$MNT/system/bin/a9_eink_server")"
 printf 'a9service.apk : %s\n'  "$(sudo stat -c%s "$MNT/system/priv-app/a9service.apk")"
