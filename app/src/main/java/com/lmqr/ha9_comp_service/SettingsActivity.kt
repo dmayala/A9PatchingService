@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.view.MenuItem
 import android.view.accessibility.AccessibilityManager
 import androidx.appcompat.app.AppCompatActivity
+import com.lmqr.ha9_comp_service.quick_settings.toggle
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import java.io.FileOutputStream
