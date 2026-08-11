@@ -57,15 +57,45 @@ def patch_OverrideAnimatorScale(instruction):
 #     adb shell setprop debug.a9.colorfade 1   # moon / last screen
 #     adb shell setprop debug.a9.colorfade 0   # chess / clock overlay
 # The change takes effect on the next screen-off; no reboot needed.
+def add_a9ColorFadeEnabled_helper(smali_file):
+    """Inject a zero-arg static helper that reads debug.a9.colorfade.
+
+    A helper is used instead of inlining the property read at each call site
+    because the free registers available there are frequently above v15, and
+    both `invoke-static {..}` and `move` take 4-bit register operands:
+        Invalid register: v17. Must be between v0 and v15, inclusive.
+    Inside the helper we control the register numbering (v0/v1), and at the
+    call site `invoke-static {}` needs no registers at all while
+    `move-result vAA` is 8-bit, so any destination register is legal.
+    """
+    cls = smali_file.smali_class
+    if cls.has_method(method = MethodDetails(name = "a9ColorFadeEnabled")):
+        return
+    cls.items.append((
+        'method',
+        SmaliMethod(
+            '.method public static a9ColorFadeEnabled()Z',
+            cls,
+            initial_instructions = [
+                '.locals 2',
+                'const-string v0, "debug.a9.colorfade"',
+                'const/4 v1, 0x0',
+                'invoke-static {v0, v1}, Landroid/os/SystemProperties;->getBoolean(Ljava/lang/String;Z)Z',
+                'move-result v0',
+                'return v0',
+            ]
+        )
+    ))
+
+
 def patch_ColorFadeEnabledFromProp(instruction):
-    registers = instruction.get_n_free_registers(2)
+    """Replace a read of mColorFadeEnabled with a call to the helper above."""
+    cls = instruction.parent.parent.class_name
     instruction.expand_before([
-        f'const-string {registers[0]}, "debug.a9.colorfade"',
-        f'const/4 {registers[1]}, 0x0',
-        f'invoke-static {{{registers[0]}, {registers[1]}}}, Landroid/os/SystemProperties;->getBoolean(Ljava/lang/String;Z)Z',
-        f'move-result {registers[0]}',
+        f'invoke-static {{}}, {cls}->a9ColorFadeEnabled()Z',
     ])
-    instruction.replace(f'move {instruction.registers[0]}, {registers[0]}')
+    instruction.replace(f'move-result {instruction.registers[0]}')
+
 
 def patch_services_jar():
     def add_pattern_to_initrc(property_name, property_value, pattern_seq, pattern_loop, do_open=False):
@@ -1080,6 +1110,7 @@ def patch_services_jar():
                 file_patterns = ([r"DisplayPowerController[0-9]*\.smali"]
                                  if os.environ.get("A9_DISABLE_COLORFADE") == "1" else []),
                 patches = [
+                    InstructionPatch(action = add_a9ColorFadeEnabled_helper),
                     InstructionPatch(
                         instruction = InstructionDetails(
                             instruction_type = InstructionType.FIELD_READ,

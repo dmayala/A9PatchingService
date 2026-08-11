@@ -29,9 +29,10 @@
 #
 set -euo pipefail
 
-OUT="${1:?usage: finalize-image.sh out.img [shader-index] [daemon]}"
+OUT="${1:?usage: finalize-image.sh out.img [shader-index] [daemon] [aod-mode]}"
 IDX="${2:-47}"
 DAEMON="${3:-}"
+MODE="${4:-0}"   # boot default for debug.a9.colorfade: 0=overlay AOD, 1=moon
 
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 SRC="$REPO/app/external_scripts/system_img_patcher/system_patched.img"
@@ -70,6 +71,17 @@ else
   sudo sed -i "0,/on property:sys.boot_completed=1/s||on property:sys.boot_completed=1\n    setprop sys.linevibrator_type $IDX|" "$V"
 fi
 
+# Boot default for the runtime AOD mode switch (see A9_DISABLE_COLORFADE).
+#   1 = ColorFade on  -> mode 1, retain last screen + moon/pause glyph
+#   0 = ColorFade off -> mode 2, a9service overlay AOD (clock/chess/battery)
+# debug.* is used because a plain adb shell can write it; sys.* and persist.sys.*
+# are SELinux-denied. debug.* does not survive a reboot, hence this line.
+if sudo grep -q "debug.a9.colorfade" "$V"; then
+  sudo sed -i "s|setprop debug.a9.colorfade .*|setprop debug.a9.colorfade $MODE|" "$V"
+else
+  sudo sed -i "0,/on property:sys.boot_completed=1/s||on property:sys.boot_completed=1\n    setprop debug.a9.colorfade $MODE|" "$V"
+fi
+
 if [ -n "$DAEMON" ]; then
   sudo cp "$DAEMON" "$MNT/system/bin/a9_eink_server"
   sudo chmod 755 "$MNT/system/bin/a9_eink_server"
@@ -79,6 +91,7 @@ fi
 
 echo "--- verification ---"
 printf 'adb props    : %s/5\n' "$(sudo grep -cE '^(ro\.build\.type=userdebug|ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP")"
+printf 'aod mode     : debug.a9.colorfade=%s\n' "$MODE"
 printf 'shader index : %s\n'   "$(sudo grep -oE 'setprop sys\.linevibrator_type [0-9]+' "$V" | head -1)"
 printf 'a9_eink_server: %s\n'  "$(sudo stat -c%s "$MNT/system/bin/a9_eink_server")"
 printf 'a9service.apk : %s\n'  "$(sudo stat -c%s "$MNT/system/priv-app/a9service.apk")"
