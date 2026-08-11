@@ -56,10 +56,23 @@
             app:defaultValue="dummy"
             app:dialogTitle="Choose an action for long press when screen is off" />
 
-        <SwitchPreferenceCompat
-            app:key="disable_show_per_app_aod_settings"
-            app:title="Disable static AOD settings in Pop-up" />
+        <ListPreference
+            app:key="override_max_brightness"
+            app:title="Override Max Brightness"
+            app:entries="@array/max_brightness_tiers"
+            app:entryValues="@array/max_brightness_tiers_values"
+            app:defaultValue="2000"
+            app:dialogTitle="Choose Max Brightness" />
 
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="AOD — mode 1: static (retain last screen)">
+
+        <!-- ColorFade paints the captured screen through a shader at screen-off,
+             and the panel latches that frame. Only a TRANSPARENT background
+             leaves your last screen visible; the other options deliberately
+             fade to black or white. A white, near-transparent glyph is
+             invisible on E Ink — pick Black + Opaque to actually see it. -->
         <ListPreference
             app:key="static_lockscreen_type"
             app:title="Set Static Lockscreen Icon"
@@ -95,16 +108,62 @@
             app:defaultValue="0"
             app:dialogTitle="Choose Static Lockscreen Icon Opacity" />
 
-        <ListPreference
-            app:key="override_max_brightness"
-            app:title="Override Max Brightness"
-            app:entries="@array/max_brightness_tiers"
-            app:entryValues="@array/max_brightness_tiers_values"
-            app:defaultValue="2000"
-            app:dialogTitle="Choose Max Brightness" />
+        <SwitchPreferenceCompat
+            app:key="disable_show_per_app_aod_settings"
+            app:title="Disable static AOD settings in Pop-up" />
 
     </PreferenceCategory>
 
+    <PreferenceCategory app:title="AOD — mode 2: overlay (clock / chess / battery)">
+
+        <!-- "Disable Overlay AOD" is the MODE SWITCH: OFF selects mode 2, ON
+             selects mode 1. It also sets doze vs full sleep and enables or
+             disables ColorFade, because the two modes need opposite behaviour. -->
+
+        <SwitchPreferenceCompat
+            app:key="disable_overlay_aod"
+            app:disableDependentsState="true"
+            app:summary="Disable the drawn AOD and fall back to the static lockscreen icon"
+            app:title="Disable Overlay AOD" />
+
+        <SwitchPreferenceCompat
+            app:dependency="disable_overlay_aod"
+            app:key="overlay_chess"
+            app:summary="Enable chess replays on AOD"
+            app:title="Chess AOD" />
+
+        <ListPreference
+            app:dependency="disable_overlay_aod"
+            app:key="music_view_timeout"
+            app:title="Set Timeout for MusicView Visibility"
+            app:summary="Time after which MusicView should disappear if the music is paused but the session still exists (in minutes)"
+            app:entries="@array/mv_timeout_options"
+            app:entryValues="@array/mv_timeout_values"
+            app:defaultValue="-1" />
+
+        <Preference
+            app:dependency="disable_overlay_aod"
+            app:key="select_aod_bg"
+            app:summary="Shown behind the clock when Chess AOD is off"
+            app:title="Select Background for AOD" />
+
+        <Preference
+            app:dependency="disable_overlay_aod"
+            app:key="remove_aod_bg"
+            app:title="Remove Background for AOD" />
+
+        <Preference
+            app:key="grant_notif_perms"
+            app:summary="Needed for notification icons on the AOD"
+            app:title="Grant Notification Permissions" />
+
+        <Preference
+            app:dependency="disable_overlay_aod"
+            app:key="request_all_file"
+            app:summary="The background file is saved where other apps such as KOReader can write it"
+            app:title="Request All File Access" />
+
+    </PreferenceCategory>
 
     <PreferenceCategory app:title="Refresh Mode Settings">
         <SwitchPreferenceCompat
@@ -121,7 +180,6 @@
             app:summaryOff="Disable setting refresh mode per application"
             app:summaryOn="Enable setting refresh mode per application"
             app:title="Disable Per-App Refresh Mode" />
-
 
         <ListPreference
             app:dependency="disable_perapprefresh"
@@ -147,32 +205,6 @@
             app:updatesContinuously="false"
             app:min="0"
             android:max="100"/>
-    </PreferenceCategory>
-
-
-    <PreferenceCategory app:title="Overlay AOD (clock / chess / battery)">
-
-        <SwitchPreferenceCompat
-            app:key="disable_overlay_aod"
-            app:disableDependentsState="true"
-            app:summary="Disable the drawn AOD and fall back to the static lockscreen icon"
-            app:title="Disable Overlay AOD" />
-
-        <SwitchPreferenceCompat
-            app:dependency="disable_overlay_aod"
-            app:key="overlay_chess"
-            app:summary="Enable chess replays on AOD"
-            app:title="Chess AOD" />
-
-        <ListPreference
-            app:dependency="disable_overlay_aod"
-            app:key="music_view_timeout"
-            app:title="Set Timeout for MusicView Visibility"
-            app:summary="Time after which MusicView should disappear if the music is paused but the session still exists (in minutes)"
-            app:entries="@array/mv_timeout_options"
-            app:entryValues="@array/mv_timeout_values"
-            app:defaultValue="-1" />
-
     </PreferenceCategory>
 
 </PreferenceScreen>

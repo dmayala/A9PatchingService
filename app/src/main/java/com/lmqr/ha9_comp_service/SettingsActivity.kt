@@ -9,7 +9,12 @@ import android.provider.Settings
 import android.view.MenuItem
 import android.view.accessibility.AccessibilityManager
 import androidx.appcompat.app.AppCompatActivity
+import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
+import java.io.FileOutputStream
+import androidx.activity.result.contract.ActivityResultContracts
+import android.widget.Toast
+import android.net.Uri
 
 
 class SettingsActivity : AppCompatActivity() {
@@ -38,8 +43,86 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     class SettingsFragment : PreferenceFragmentCompat() {
+
+        // Picks an image and copies it to getBackgroundFileImage(), which
+        // AlwaysOnDisplay.loadBackgroundImage() reads and draws as the AOD
+        // background. Only meaningful in overlay-AOD mode (mode 2); the static
+        // ColorFade AOD renders a shader, not a bitmap.
+        private val imagePickerLauncher =
+            registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+                uri?.let {
+                    activity?.run {
+                        val file = getBackgroundFileImage(this)
+                        contentResolver.openInputStream(it)?.run {
+                            FileOutputStream(file).use { out -> copyTo(out) }
+                            close()
+                            onUpdatedImage()
+                            Toast.makeText(
+                                requireContext(),
+                                "Background image updated successfully.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+            }
+
+        // Flipping this preference is what tells A9AccessibilityService to call
+        // alwaysOnDisplay.update(), which re-reads the file. loadBackgroundImage()
+        // early-returns unless file.lastModified() changed, so the toggle is the
+        // signal, not a redundant repaint.
+        private fun onUpdatedImage() {
+            preferenceManager.sharedPreferences?.toggle("aod_image_updated")
+        }
+
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.root_preferences, rootKey)
+
+            (findPreference("select_aod_bg") as Preference?)?.onPreferenceClickListener =
+                Preference.OnPreferenceClickListener {
+                    imagePickerLauncher.launch("image/*")
+                    true
+                }
+
+            (findPreference("remove_aod_bg") as Preference?)?.onPreferenceClickListener =
+                Preference.OnPreferenceClickListener {
+                    val file = getBackgroundFileImage(requireContext())
+                    if (file.exists() && file.delete()) {
+                        Toast.makeText(
+                            requireContext(),
+                            "Background image removed successfully.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        onUpdatedImage()
+                    } else {
+                        Toast.makeText(
+                            requireContext(),
+                            "No background image to remove.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    true
+                }
+
+            // The background file lives in shared storage so other apps (KOReader
+            // etc.) can write it too; that needs all-files access on API 30+.
+            (findPreference("request_all_file") as Preference?)?.onPreferenceClickListener =
+                Preference.OnPreferenceClickListener {
+                    try {
+                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION))
+                    } catch (e: ActivityNotFoundException) {
+                        startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    }
+                    true
+                }
+
+            (findPreference("grant_notif_perms") as Preference?)?.onPreferenceClickListener =
+                Preference.OnPreferenceClickListener {
+                    val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    requireContext().startActivity(intent)
+                    true
+                }
         }
     }
 
