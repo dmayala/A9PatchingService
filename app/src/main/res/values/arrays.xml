@@ -143,4 +143,14 @@
         <item>5</item>
         <item>10</item>
     </string-array>
+    <string-array name="aod_mode_options">
+        <item>Stock Android</item>
+        <item>Static (keep last screen)</item>
+        <item>Overlay (clock / chess / battery)</item>
+    </string-array>
+    <string-array name="aod_mode_values">
+        <item>stock</item>
+        <item>static</item>
+        <item>overlay</item>
+    </string-array>
 </resources>

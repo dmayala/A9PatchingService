@@ -55,7 +55,7 @@ class A9AccessibilityService : AccessibilityService(),
                 Intent.ACTION_SCREEN_OFF -> {
                     isScreenOn = false
                     menuBinding.close()
-                    if (!sharedPreferences.getBoolean("disable_overlay_aod", false))
+                    if (sharedPreferences.getString("aod_mode", "overlay") == "overlay")
                         alwaysOnDisplay.openAOD()
                     // FORCE_CLEAR rather than SPEED_CLEAR: the overlay is only
                     // composited after ACTION_SCREEN_OFF is delivered, so the panel
@@ -457,9 +457,12 @@ class A9AccessibilityService : AccessibilityService(),
             // (black background, corner clock) which is wrong on E Ink.
             //
             // ColorFade itself is switched by applyMode() via the stl sentinel.
-            "disable_overlay_aod" -> {
-                val staticAod = sharedPreferences?.getBoolean("disable_overlay_aod", false) ?: false
-                val doze = if (staticAod) 0 else 1
+            "aod_mode" -> {
+                // Only the overlay AOD needs doze (the display must stay in a
+                // low-power ON state so SurfaceFlinger keeps compositing). Static
+                // needs full sleep so ColorFade's painted frame is the last one
+                // drawn. Stock is left to sleep normally too.
+                val doze = if (sharedPreferences?.getString("aod_mode", "overlay") == "overlay") 1 else 0
                 try {
                     Settings.Secure.putInt(contentResolver, "doze_always_on", doze)
                     Settings.Secure.putInt(contentResolver, "doze_enabled", doze)

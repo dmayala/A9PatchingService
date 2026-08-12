@@ -68,14 +68,16 @@
 
     <PreferenceCategory app:title="Always On Display">
 
-        <!-- THE mode switch. Also flips doze vs full sleep and enables/disables
-             ColorFade, because the two implementations need opposite behaviour;
-             see A9AccessibilityService."disable_overlay_aod". -->
-        <SwitchPreferenceCompat
-            app:key="disable_overlay_aod"
-            app:title="Use Static AOD"
-            app:summary="On: keep the last screen on the panel with a small glyph. Off: draw a clock, chess, battery and music instead."
-            app:disableDependentsState="true" />
+        <!-- THE mode selector. Also drives doze vs full sleep and whether
+             ColorFade runs, via the stl sentinels (96 = overlay, 97 = stock);
+             see A9AccessibilityService."aod_mode". -->
+        <ListPreference
+            app:key="aod_mode"
+            app:title="Always On Display mode"
+            app:entries="@array/aod_mode_options"
+            app:entryValues="@array/aod_mode_values"
+            app:defaultValue="overlay"
+            app:useSimpleSummaryProvider="true" />
 
     </PreferenceCategory>
 

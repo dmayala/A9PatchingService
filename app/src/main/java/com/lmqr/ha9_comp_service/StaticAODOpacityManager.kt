@@ -9,6 +9,10 @@ import kotlin.math.min
 // to run ColorFade at all. See A9_DISABLE_COLORFADE in the patcher.
 const val COLORFADE_OFF_SENTINEL = 96
 
+// Tells the patched readFile() to return the ORIGINAL framework shader,
+// i.e. leave ColorFade behaving exactly as on an unpatched build.
+const val COLORFADE_STOCK_SENTINEL = 97
+
 enum class AODOpacity(val mode: Int) {
     OPAQUE( 0),
     SEMIOPAQUE(1),
@@ -91,9 +95,15 @@ class StaticAODOpacityManager(
                 //
                 // So: overlay AOD enabled -> 96 -> ColorFade off  (mode 2)
                 //     overlay AOD disabled -> real index -> ColorFade on (mode 1)
-                if (!getBoolean("disable_overlay_aod", false)) {
-                    commandRunner.runCommands(arrayOf("stl$COLORFADE_OFF_SENTINEL"))
-                    return
+                when (getString("aod_mode", "overlay")) {
+                    "overlay" -> {
+                        commandRunner.runCommands(arrayOf("stl$COLORFADE_OFF_SENTINEL"))
+                        return
+                    }
+                    "stock" -> {
+                        commandRunner.runCommands(arrayOf("stl$COLORFADE_STOCK_SENTINEL"))
+                        return
+                    }
                 }
                 if(!isReader) {
                     val op =

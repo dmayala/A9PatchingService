@@ -90,13 +90,14 @@ def add_a9ColorFadeEnabled_helper(smali_file):
                 'const/4 v1, 0x0',
                 'invoke-static {v0, v1}, Landroid/os/SystemProperties;->getInt(Ljava/lang/String;I)I',
                 'move-result v0',
-                # enabled = (0 <= t < 96)
+                # enabled = (t != 96)
+                #   0..95 -> our shader   (static AOD)
+                #   96    -> DISABLED     (overlay AOD draws instead)
+                #   97    -> stock shader (stock behaviour) - still enabled,
+                #            readFile sends it to the original implementation
                 'const/4 v2, 0x1',
-                'if-ltz v0, :a9_cf_disabled',
                 'const/16 v3, 0x60',
-                'if-ge v0, v3, :a9_cf_disabled',
-                'goto :a9_cf_default_ready',
-                ':a9_cf_disabled',
+                'if-ne v0, v3, :a9_cf_default_ready',
                 'const/4 v2, 0x0',
                 ':a9_cf_default_ready',
                 # debug.a9.colorfade overrides when set, else falls through to the
@@ -456,6 +457,11 @@ def patch_services_jar():
             ":try_number_type_end",
             ".catchall {:try_number_type_start .. :try_number_type_end} :catch_number_type",
             f"if-ltz {registers[0]}, :catch_number_type",
+            # SENTINEL 97 = "stock": jump to the original readFile body so the
+            # untouched framework shader is returned and ColorFade behaves exactly
+            # as it does on an unpatched build (fade to black, stock doze AOD).
+            f"const {registers[1]}, 0x61",
+            f"if-eq {registers[0]}, {registers[1]}, :other_resource",
             f"const {registers[1]}, {hex(len(shaders))}",
             f"if-ge {registers[0]}, {registers[1]}, :catch_number_type",
             f"sget-object {registers[1]}, {method.parent.class_name}->SHADER_LIST:[Ljava/lang/String;",
