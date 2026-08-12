@@ -425,6 +425,16 @@ class A9AccessibilityService : AccessibilityService(),
         }
     }
 
+    private fun setDoze(value: Int) {
+        try {
+            Settings.Secure.putInt(contentResolver, "doze_always_on", value)
+            Settings.Secure.putInt(contentResolver, "doze_enabled", value)
+        } catch (e: SecurityException) {
+            // needs WRITE_SECURE_SETTINGS, i.e. the app must be in priv-app
+            e.printStackTrace()
+        }
+    }
+
     // Called by PerformAODExtraButtonAction: advances the AOD extra view
     // (e.g. plays the next chess move) without waking the device.
     fun performAODAction() = alwaysOnDisplay.performExtraAction()
@@ -458,17 +468,22 @@ class A9AccessibilityService : AccessibilityService(),
             //
             // ColorFade itself is switched by applyMode() via the stl sentinel.
             "aod_mode" -> {
-                // Only the overlay AOD needs doze (the display must stay in a
-                // low-power ON state so SurfaceFlinger keeps compositing). Static
-                // needs full sleep so ColorFade's painted frame is the last one
-                // drawn. Stock is left to sleep normally too.
-                val doze = if (sharedPreferences?.getString("aod_mode", "overlay") == "overlay") 1 else 0
-                try {
-                    Settings.Secure.putInt(contentResolver, "doze_always_on", doze)
-                    Settings.Secure.putInt(contentResolver, "doze_enabled", doze)
-                } catch (e: SecurityException) {
-                    // needs WRITE_SECURE_SETTINGS, i.e. the app must be in priv-app
-                    e.printStackTrace()
+                // overlay -> doze ON: the display must stay in a low-power ON
+                //            state so SurfaceFlinger keeps compositing, otherwise
+                //            the overlay is never drawn to the panel.
+                // static  -> doze OFF: full sleep, so ColorFade's painted frame is
+                //            the last thing drawn and the panel latches it. Leaving
+                //            doze on here gets SystemUI's own AOD instead.
+                // stock   -> DO NOT TOUCH. "Stock" means the framework is left
+                //            alone, so Android's own Settings > Display > Lock
+                //            screen > "Always show time and info" governs. Forcing
+                //            doze off here would disable Android's AOD, which is
+                //            not stock behaviour -- it is stock minus AOD, and on
+                //            a bistable panel it just leaves a black screen.
+                when (sharedPreferences?.getString("aod_mode", "overlay")) {
+                    "overlay" -> setDoze(1)
+                    "static" -> setDoze(0)
+                    // "stock": intentionally no doze write
                 }
                 staticAODOpacityManager.applyMode()
             }
