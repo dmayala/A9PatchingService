@@ -79,14 +79,33 @@ class SettingsActivity : AppCompatActivity() {
         // Show only the settings belonging to the selected AOD mode. Both sets
         // exist in the XML; the unused one is hidden rather than merely disabled,
         // because a greyed-out block of ten irrelevant options is just noise.
+        // Both modes' options live in the one "Always On Display" section; the
+        // set that does not apply is hidden rather than greyed out. "stock"
+        // hides both, since nothing here applies when the framework is left
+        // to its own behaviour.
+        private val staticAodKeys = listOf(
+            "static_lockscreen_type",
+            "static_lockscreen_opacity",
+            "static_lockscreen_bg_opacity",
+            "static_lockscreen_mix_color",
+            "disable_show_per_app_aod_settings",
+        )
+
+        private val overlayAodKeys = listOf(
+            "overlay_chess",
+            "music_view_timeout",
+            "select_aod_bg",
+            "remove_aod_bg",
+            "grant_notif_perms",
+            "request_all_file",
+        )
+
         private fun updateAodSections(mode: String? = null) {
             val m = mode
                 ?: preferenceManager.sharedPreferences?.getString("aod_mode", "overlay")
                 ?: "overlay"
-            // "stock" shows neither section: nothing here applies when the
-            // framework is left to its own behaviour.
-            findPreference<Preference>("cat_aod_static")?.isVisible = m == "static"
-            findPreference<Preference>("cat_aod_overlay")?.isVisible = m == "overlay"
+            staticAodKeys.forEach { findPreference<Preference>(it)?.isVisible = m == "static" }
+            overlayAodKeys.forEach { findPreference<Preference>(it)?.isVisible = m == "overlay" }
         }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {

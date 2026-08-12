@@ -79,11 +79,9 @@
             app:defaultValue="overlay"
             app:useSimpleSummaryProvider="true" />
 
-    </PreferenceCategory>
-
-    <PreferenceCategory
-        app:key="cat_aod_static"
-        app:title="Static AOD">
+        <!-- Both modes' options live here; SettingsActivity hides whichever set
+             does not apply to the selected mode, so only one is ever shown and
+             "Stock Android" shows none. -->
 
         <!-- ColorFade paints the captured screen through a shader at screen-off,
              and the panel latches that frame. Only a TRANSPARENT background
@@ -128,12 +126,6 @@
         <SwitchPreferenceCompat
             app:key="disable_show_per_app_aod_settings"
             app:title="Disable static AOD settings in Pop-up" />
-
-    </PreferenceCategory>
-
-    <PreferenceCategory
-        app:key="cat_aod_overlay"
-        app:title="Overlay AOD">
 
         <!-- "Disable Overlay AOD" is the MODE SWITCH: OFF selects mode 2, ON
              selects mode 1. It also sets doze vs full sleep and enables or
