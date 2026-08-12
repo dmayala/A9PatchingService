@@ -1687,10 +1687,32 @@ def main():
         # Only enable on a testkey-signed base (e.g. TrebleDroid AOSP).
         if os.environ.get("A9_PATCH_TREBLEAPP") == "1":
             replace_file("d/system/priv-app/TrebleApp/TrebleApp.apk")
+        else:
+            logging.warning("SKIPPING TrebleApp (set A9_PATCH_TREBLEAPP=1 only on a "
+                            "testkey-signed base)")
+
+        # The A9 treble overlay is gated SEPARATELY from TrebleApp, and defaults ON.
+        #
+        # It is an RRO, not an app joining a sharedUserId, so the signature rule that
+        # makes TrebleApp fatal does not apply: it is a STATIC overlay targeting
+        # "android", preinstalled into /product/overlay, gated on
+        # ro.vendor.build.fingerprint matching *Hisense/HLTE556N*. Preinstalled
+        # system overlays are permitted on policy grounds rather than by matching
+        # the platform certificate.
+        #
+        # Worth having -- it carries real device enablement that is otherwise absent:
+        #   config_autoBrightnessLcdBacklightValues / config_autoBrightnessLevels
+        #       the A9's 13-point auto-brightness curve
+        #   config_device_volte_available / _vt_available / _wfc_ims_available
+        #       VoLTE, video calling, WiFi calling
+        #   config_automatic_brightness_available, config_dozeAfterScreenOff,
+        #   config_hotswapCapable, assorted wifi/bt capability flags
+        #
+        # Set A9_PATCH_TREBLE_OVERLAY=0 to skip it if it ever proves troublesome.
+        if os.environ.get("A9_PATCH_TREBLE_OVERLAY", "1") == "1":
             replace_file("d/system/product/overlay/treble-overlay-Hisense-HLTE556N.apk")
         else:
-            logging.warning("SKIPPING TrebleApp + treble-overlay (set A9_PATCH_TREBLEAPP=1 "
-                            "only on a testkey-signed base)")
+            logging.warning("SKIPPING treble-overlay (A9_PATCH_TREBLE_OVERLAY=0)")
         replace_file("d/system/bin/a9_eink_server", perms = 0o755, owner = "root:2000", secontext = "u:object_r:phhsu_exec:s0")
         replace_file("d/system/priv-app/a9service.apk")
         replace_file("d/system/priv-app/org.fdroid.fdroid.privileged.apk")
