@@ -5,19 +5,24 @@
 #
 #   ./tools/finalize-image.sh out.img [shader-index] [path/to/a9_eink_server]
 #
-# 1. adb/root properties. ON BY DEFAULT, and you want them for any image you
-#    intend to debug: flashing without them can leave the device unreachable,
-#    because on a `user` build USB debugging is off and if the panel is not
-#    usable there is no way in except the hardware key combo.
-#    (On some bases these are overridden earlier in the property load order and
-#    will not take effect - verify with `adb shell getprop ro.debuggable`.
-#    Measured on LineageOS 23.2: ro.debuggable stays 0 and `adb root` is
-#    refused, so on that base these buy less than they appear to.)
+# 1. adb/root properties. OFF BY DEFAULT -- this tool is run by other people, so
+#    the safe configuration has to be the one you get without knowing to ask for
+#    it. A patched image should not ship with ro.secure=0, ro.adb.secure=0 and
+#    USB defaulting to adb; the user turns on USB debugging in Developer Options
+#    like on any other phone.
 #
-#    A9_RELEASE=1 skips them. Use it for anything handed to another person: a
-#    public image should not ship with ro.secure=0, ro.adb.secure=0 and USB
-#    defaulting to adb. The recipient turns on USB debugging in Developer
-#    Options like on any other phone.
+#    A9_DEV=1 bakes them in:
+#      ro.build.type=userdebug  ro.debuggable=1  ro.secure=0
+#      ro.adb.secure=0          persist.sys.usb.config=adb
+#    Use it for anything YOU are going to debug. Without them a bad flash can
+#    leave the device unreachable, because USB debugging is off on a fresh
+#    /data and if the panel is not usable there is no way in except the hardware
+#    key combo. (Recovery and fastboot are unaffected either way.)
+#
+#    Note they buy less than they look like on some bases: measured on
+#    LineageOS 23.2, ro.debuggable stays 0 and `adb root` is refused regardless,
+#    because these are overridden earlier in the property load order. Verify
+#    with `adb shell getprop ro.debuggable`.
 #
 # 2. a9_eink_server. Two builds exist and they pair with different app versions:
 #      47224 B (May 2024)  - no stl/wov commands; pairs with a9service v1.4.1
@@ -71,9 +76,11 @@ cleanup() { sudo umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || 
 trap cleanup EXIT
 
 BP="$MNT/system/build.prop"
-RELEASE="${A9_RELEASE:-0}"
-if [ "$RELEASE" = "1" ]; then
-  echo "A9_RELEASE=1: NOT baking adb/root properties (release image)"
+# Safe by default: debug props only when explicitly asked for. A9_RELEASE=1 is
+# still honoured as a no-op so older invocations do not silently change meaning.
+DEV="${A9_DEV:-0}"
+if [ "$DEV" != "1" ]; then
+  echo "release image: NOT baking adb/root properties (set A9_DEV=1 to debug)"
 else
   for kv in ro.build.type=userdebug ro.debuggable=1 ro.secure=0 ro.adb.secure=0 persist.sys.usb.config=adb; do
     k="${kv%%=*}"; ek="$(printf '%s' "$k" | sed 's/\./\\./g')"
@@ -117,14 +124,14 @@ if [ -n "$DAEMON" ]; then
 fi
 
 echo "--- verification ---"
-if [ "$RELEASE" = "1" ]; then
+if [ "$DEV" != "1" ]; then
   # Report what the BASE ships, so a stray debug prop in the base cannot slip
-  # into a release image unnoticed.
+  # into a released image unnoticed.
   printf 'adb props    : SKIPPED (release); base has %s debug prop(s)\n' \
     "$(sudo grep -cE '^(ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP" || true)"
   printf 'build type   : %s\n' "$(sudo grep -m1 '^ro.build.type=' "$BP" || echo '<unset>')"
 else
-  printf 'adb props    : %s/5\n' "$(sudo grep -cE '^(ro\.build\.type=userdebug|ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP")"
+  printf 'adb props    : %s/5 (A9_DEV=1)\n' "$(sudo grep -cE '^(ro\.build\.type=userdebug|ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP")"
 fi
 printf 'aod override : %s\n' "${MODE:-<unset - app drives via stl sentinel>}"
 printf 'shader index : %s\n'   "$(sudo grep -oE 'setprop sys\.linevibrator_type [0-9]+' "$V" | head -1)"
