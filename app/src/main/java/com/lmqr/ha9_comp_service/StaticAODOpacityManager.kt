@@ -95,7 +95,7 @@ class StaticAODOpacityManager(
                 //
                 // So: overlay AOD enabled -> 96 -> ColorFade off  (mode 2)
                 //     overlay AOD disabled -> real index -> ColorFade on (mode 1)
-                when (getString("aod_mode", "overlay")) {
+                when (getString("aod_mode", "static")) {
                     "overlay" -> {
                         commandRunner.runCommands(arrayOf("stl$COLORFADE_OFF_SENTINEL"))
                         return

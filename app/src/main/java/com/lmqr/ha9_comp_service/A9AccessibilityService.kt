@@ -55,7 +55,7 @@ class A9AccessibilityService : AccessibilityService(),
                 Intent.ACTION_SCREEN_OFF -> {
                     isScreenOn = false
                     menuBinding.close()
-                    if (sharedPreferences.getString("aod_mode", "overlay") == "overlay")
+                    if (sharedPreferences.getString("aod_mode", "static") == "overlay")
                         alwaysOnDisplay.openAOD()
                     // FORCE_CLEAR rather than SPEED_CLEAR: the overlay is only
                     // composited after ACTION_SCREEN_OFF is delivered, so the panel
@@ -480,7 +480,7 @@ class A9AccessibilityService : AccessibilityService(),
                 //            doze off here would disable Android's AOD, which is
                 //            not stock behaviour -- it is stock minus AOD, and on
                 //            a bistable panel it just leaves a black screen.
-                when (sharedPreferences?.getString("aod_mode", "overlay")) {
+                when (sharedPreferences?.getString("aod_mode", "static")) {
                     "overlay" -> setDoze(1)
                     "static" -> setDoze(0)
                     // "stock": intentionally no doze write

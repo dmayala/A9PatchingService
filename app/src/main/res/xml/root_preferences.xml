@@ -76,7 +76,7 @@
             app:title="Always On Display mode"
             app:entries="@array/aod_mode_options"
             app:entryValues="@array/aod_mode_values"
-            app:defaultValue="overlay"
+            app:defaultValue="static"
             app:useSimpleSummaryProvider="true" />
 
         <!-- Both modes' options live here; SettingsActivity hides whichever set

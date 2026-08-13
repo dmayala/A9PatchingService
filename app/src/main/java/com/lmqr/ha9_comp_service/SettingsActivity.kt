@@ -102,8 +102,8 @@ class SettingsActivity : AppCompatActivity() {
 
         private fun updateAodSections(mode: String? = null) {
             val m = mode
-                ?: preferenceManager.sharedPreferences?.getString("aod_mode", "overlay")
-                ?: "overlay"
+                ?: preferenceManager.sharedPreferences?.getString("aod_mode", "static")
+                ?: "static"
             staticAodKeys.forEach { findPreference<Preference>(it)?.isVisible = m == "static" }
             overlayAodKeys.forEach { findPreference<Preference>(it)?.isVisible = m == "overlay" }
         }
