@@ -271,6 +271,21 @@ def patch_ColorFadeEnabledFromProp(instruction):
 # a package listed here is granted its signature permissions unconditionally --
 # there is no reason to widen that to an app we did not actually touch.
 def resigned_packages():
+    # DIAGNOSTIC (2026-08-13): A9_FORCE_RESIGN_SUPPORT=1 applies the two
+    # side-effects of re-signing -- the AppIdPermissionPolicy patch in
+    # services.jar and the plat_mac_permissions.xml signer -- WITHOUT repacking
+    # or re-signing SystemUI itself.
+    #
+    # Needed because A9_PATCH_SYSTEMUI=1 changes three things at once, and with
+    # every patch group skipped it still broke app scrolling. Skipping the
+    # side-effects while still re-signing would confound the test (SystemUI
+    # would lose its ~155 signature permissions and misbehave for that reason
+    # instead), so isolate from the other direction: stock SystemUI, keeping its
+    # original signature, plus these two changes. If that breaks scrolling the
+    # fault is here; if it does not, the fault is in the APK repack/re-sign.
+    if os.environ.get("A9_FORCE_RESIGN_SUPPORT") == "1":
+        return ["com.android.systemui"]
+
     pkgs = []
     if os.environ.get("A9_PATCH_SYSTEMUI") == "1":
         pkgs.append("com.android.systemui")
@@ -339,6 +354,83 @@ def patch_AppIdPermissionPolicy(method):
 
     method.first_instruction.next.expand_before(lines)
     logging.info(f"AppIdPermissionPolicy: signature permissions forced for {pkgs}")
+
+
+# Runtime permissions the stock, platform-signed SystemUI receives by default.
+# Taken from what com.android.systemui was denied on a freshly formatted /data
+# once re-signed (measured 2026-08-13).
+SYSTEMUI_DEFAULT_RUNTIME_PERMISSIONS = [
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.BLUETOOTH_ADVERTISE",
+    "android.permission.BLUETOOTH_CONNECT",
+    "android.permission.BLUETOOTH_SCAN",
+    "android.permission.CAMERA",
+    "android.permission.GET_ACCOUNTS",
+    "android.permission.READ_CONTACTS",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.READ_PHONE_STATE",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+]
+
+
+def add_default_runtime_permissions():
+    """Re-grant the runtime permissions a re-signed SystemUI stops receiving.
+
+    THE BUG THIS FIXES. Re-signing SystemUI means it is no longer platform
+    signed, so DefaultPermissionGrantPolicy stops pre-granting it runtime
+    permissions. SystemUI's BluetoothEventManager then handles
+    android.bluetooth.adapter.action.STATE_CHANGED, calls getSupportedProfiles()
+    and dies:
+
+        FATAL EXCEPTION: SysUiBg
+        Caused by: java.lang.SecurityException: Need
+          android.permission.BLUETOOTH_CONNECT permission for ...
+          BluetoothAdapterServiceBinder.getSupportedProfiles()
+
+    That is fatal, so SystemUI restarts, receives the broadcast again and dies
+    again -- measured at ~34 restarts. A SystemUI cycling every couple of
+    seconds tears down window and input state constantly, which presents as
+    "app lists will not scroll" while individual taps still land. It is easy to
+    misread as a graphics or E Ink fault; it is not.
+
+    WHY IT SURVIVES A REFLASH. These default grants are applied ONCE and
+    recorded in /data/system/users/<u>/runtime-permissions.xml. Once that file
+    says the defaults were applied, flashing a stock SystemUI back does not
+    re-run them, so a known-good build stays broken until /data is wiped.
+    Anything bisecting system images without wiping in between will get
+    contradictory answers.
+
+    THE FIX. /system/etc/default-permissions/*.xml grants runtime permissions to
+    a package BY NAME, needs no signature, and is the supported mechanism --
+    the runtime-permission counterpart to the AppIdPermissionPolicy patch we
+    already apply for signature permissions. The ROM already ships one of these
+    for co.aospa.sense, so the format is copied from it.
+    """
+    if not resigned_packages():
+        return
+
+    path = "d/system/etc/default-permissions/a9-resigned-permissions.xml"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    lines = ['<?xml version="1.0" encoding="utf-8"?>',
+             '<!-- Added by the A9 patcher: re-signed system apps are no longer',
+             '     platform-signed and stop receiving default runtime grants. -->',
+             '<exceptions>']
+    for pkg in resigned_packages():
+        lines.append(f'    <exception package="{pkg}">')
+        for perm in SYSTEMUI_DEFAULT_RUNTIME_PERMISSIONS:
+            lines.append(f'        <permission name="{perm}" fixed="false"/>')
+        lines.append('    </exception>')
+    lines.append('</exceptions>')
+
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o644)
+    run_command(f"setfattr -n security.selinux -v u:object_r:system_file:s0 {path}")
+    logging.info(f"default-permissions: granted {len(SYSTEMUI_DEFAULT_RUNTIME_PERMISSIONS)} "
+                 f"runtime permissions to {resigned_packages()}")
 
 
 def add_signer_to_mac_permissions():
@@ -1557,7 +1649,72 @@ def patch_services_jar():
         ]
     ).patch()
 
+def apply_sui_skip(groups):
+    """Bisection aid: A9_SUI_SKIP=0,3,7 disables those SystemUI patch groups.
+
+    WHY THIS EXISTS. Measured 2026-08-13, both on a freshly formatted /data:
+    with A9_PATCH_SYSTEMUI=1 app lists stop scrolling (taps still work, the
+    launcher still works, composition is alive); with A9_PATCH_SYSTEMUI=0 the
+    same tree scrolls normally. So something in this group list -- or the
+    repack/re-sign itself -- breaks scrolling, and the only way to find it is to
+    disable groups one at a time.
+
+    Skipping EVERY group is the useful first probe: SystemUI is still
+    decompiled, rebuilt and re-signed, but byte-for-byte unpatched. If that
+    still breaks, the fault is in the repack/re-sign path (or the
+    AppIdPermissionPolicy / plat_mac_permissions changes that ride along with
+    it), not in any individual patch.
+
+    Indexes are printed on every run so the numbering can never drift out of
+    sync with this comment.
+    """
+    for i, g in enumerate(groups):
+        pats = getattr(g, "file_patterns", None)
+        label = pats if pats is not None else f"<{type(g).__name__}>"
+        logging.info(f"  SUI group {i:2d}: {label}")
+
+    raw = os.environ.get("A9_SUI_SKIP", "").replace(" ", "")
+    skip = {int(x) for x in raw.split(",") if x}
+    for i in sorted(skip):
+        if not (0 <= i < len(groups)):
+            logging.error(f"[A9_SUI_SKIP] no such SystemUI group: {i}")
+            continue
+        if not hasattr(groups[i], "file_patterns"):
+            logging.warning(f"[A9_SUI_SKIP] group {i} is not a FilePatch, ignoring")
+            continue
+        logging.warning(f"[A9_SUI_SKIP] disabling group {i}: {groups[i].file_patterns}")
+        groups[i].file_patterns = []
+
+
 def patch_systemui():
+    # DIAGNOSTIC (2026-08-13): A9_RESIGN_ONLY=1 re-signs the STOCK SystemUI.apk
+    # with our key and does not run apktool at all -- no decompile, no smali
+    # round-trip, no rebuild.
+    #
+    # Splits the last two variables. Measured so far: repacking + re-signing
+    # SystemUI breaks app-list scrolling even with every patch group skipped,
+    # while the services.jar and plat_mac_permissions changes alone are fine.
+    # Comparing the two APKs, resources.arsc and AndroidManifest.xml come out
+    # byte-identical and no entries are lost; only the dex files change, growing
+    # ~17% (12.2->14.3 MB and 11.1->13.0 MB) from the baksmali/smali round-trip.
+    # So the fault is either that round-trip or the certificate change.
+    #   works  -> the dex round-trip is at fault
+    #   breaks -> the certificate change is at fault
+    if os.environ.get("A9_RESIGN_ONLY") == "1":
+        apk = "d/system/system_ext/priv-app/SystemUI/SystemUI.apk"
+        logging.warning("A9_RESIGN_ONLY=1: re-signing stock SystemUI.apk, no apktool")
+        # MUST zipalign before signing. Signing in place rewrites the zip and
+        # destroys the 4-byte alignment of the STORED resources.arsc; Android
+        # then refuses to load the APK and SystemUI silently does not exist at
+        # all (no package, no process) -- which looks like "the bug is fixed"
+        # while actually removing the component under test.
+        run_command(f"zipalign -p -f 4 {apk} {apk}.aligned")
+        run_command(f"apksigner sign --key {SIGN_KEY} --cert {SIGN_CERT} {apk}.aligned")
+        shutil.move(f"{apk}.aligned", apk)
+        run_command(f"chmod 644 {apk}")
+        run_command(f"setfattr -n security.selinux -v u:object_r:system_file:s0 {apk}")
+        return
+
     # The scrim alpha/tint values moved to SCRIM_TARGETS at module scope, next
     # to patch_ScrimStates -- the A16 retarget needs them outside this function.
     wallpaper_flag_count = 0
@@ -1648,9 +1805,7 @@ def patch_systemui():
         if next_instruction.instruction_type == InstructionType.MOVE_RESULT:
             next_instruction.replace(f'const {next_instruction.registers[0]}, {result}')
 
-    JarPatcher(
-        "d/system/system_ext/priv-app/SystemUI/SystemUI.apk",
-        [
+    sui_groups = [
             FilePatch(
                 file_patterns = [r"Doze(Sensors|Triggers).*\.smali"],
                 patches = [
@@ -1894,7 +2049,13 @@ def patch_systemui():
             ),
             # Runs last: reports whether every ScrimState target actually landed.
             FunctionPatch(verify_scrim_patches),
-        ]
+    ]
+
+    apply_sui_skip(sui_groups)
+
+    JarPatcher(
+        "d/system/system_ext/priv-app/SystemUI/SystemUI.apk",
+        sui_groups
     ).patch(install = ["d/system/system_ext/priv-app/SystemUI/SystemUI.apk"], sign = True)
 
 def patch_AddTintToCall():
@@ -1990,6 +2151,16 @@ def update_vndk_rc():
         "    start a9_eink_server\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/sh -c 'existing=$(/system/bin/settings get secure enabled_accessibility_services); new_service=\"com.lmqr.ha9_comp_service/.A9AccessibilityService\"; if ! echo \"$existing\" | /system/bin/grep -q -F \"$new_service\"; then if [ -n \"$existing\" ]; then updated=\"$existing:$new_service\"; else updated=\"$new_service\"; fi; /system/bin/settings put secure enabled_accessibility_services \"$updated\"; fi'\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/appops set com.lmqr.ha9_comp_service SYSTEM_ALERT_WINDOW allow\n",
+        # Force light theme on first boot. This ROM defaults to dark mode
+        # ("Night mode: yes" on a freshly wiped /data), which is wrong for a
+        # bistable E Ink panel -- it inverts most of the UI to a large black
+        # area, which is slower to redraw, ghosts more and wastes the panel's
+        # contrast. It also skews screenshot-diff testing.
+        #
+        # ui_night_mode: 1 = MODE_NIGHT_NO, 2 = MODE_NIGHT_YES.
+        # Only applied when unset, so a deliberate later choice is not
+        # overwritten on every reboot.
+        "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/sh -c 'cur=$(/system/bin/settings get secure ui_night_mode); if [ \"$cur\" = \"null\" ] || [ -z \"$cur\" ]; then /system/bin/settings put secure ui_night_mode 1; /system/bin/cmd uimode night no; fi'\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/chmod 444 /sys/class/leds/aw99703-bl-1/brightness\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/chmod 444 /sys/class/leds/aw99703-bl-2/brightness\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/chown root:root /sys/class/leds/aw99703-bl-1/brightness\n",
@@ -2128,6 +2299,10 @@ def main():
         # A9_PATCH_SERVICES: the SELinux domain is decided by this file alone.
         # (The matching permission-engine patch lives in patch_services_jar.)
         add_signer_to_mac_permissions()
+
+        # Signature permissions are handled by the AppIdPermissionPolicy patch;
+        # this covers the RUNTIME ones, which a re-signed app also loses.
+        add_default_runtime_permissions()
 
         # A9_PATCH_SERVICES=0 reproduces the pre-2024-08 "shell script" setup:
         # build.prop + vndk.rc + a9_eink_server + a9service.apk only, with a
