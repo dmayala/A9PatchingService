@@ -15,8 +15,13 @@
 # It also renamed -c to --copy-original. smali_patcher.py targets 3.x.
 #
 # ------------------------------------------------------------------ gates ---
-# All default 0 unless stated. Every one of these exists because the patch is
-# either broken on Android 16 or mutually exclusive with another.
+# Each gate is written below with its NON-default value, so what you see is what
+# you would have to pass to change things. Defaults as of 2026-08-13:
+#   ON  : A9_PATCH_VIBRATOR, A9_PATCH_COLORFADE, A9_DISABLE_COLORFADE,
+#         A9_PATCH_TREBLE_OVERLAY, A9_PATCH_SERVICES
+#   OFF : A9_PATCH_SYSTEMUI, A9_PATCH_DIALER, A9_PATCH_TREBLEAPP
+# Each exists because the patch is either broken on Android 16, needs a key we
+# may not want to use, or pairs with another gate.
 #
 #   A9_PATCH_SYSTEMUI=1    SystemUI.apk patches (AOD scrims, doze sensors,
 #                          ImageWallpaper ambient redraw). Re-signed with
@@ -40,12 +45,27 @@
 #                          field: callerInfo was RETYPED (Vibration$CallerInfo
 #                          -> VibrationSession$CallerInfo) and the parameter
 #                          became SingleVibrationSession. Both are handled now.
-#   A9_PATCH_COLORFADE=1   v3.x shader static AOD: 96 SHADER_LIST variants,
-#                          moon/pause glyph, index read from
-#                          sys.linevibrator_type. Retains your LAST SCREEN.
-#   A9_DISABLE_COLORFADE=1 Force mColorFadeEnabled=false. Required for the
-#                          overlay AOD (clock/chess/battery). Mutually
-#                          exclusive with A9_PATCH_COLORFADE.
+#   BOTH COLORFADE GATES DEFAULT ON, and you almost always want both. They are
+#   NOT alternatives -- despite the names, they do different halves of the job:
+#
+#   A9_PATCH_COLORFADE=0   Skip the shader list. This is what DRAWS mode 1: the
+#                          96 SHADER_LIST variants and the moon/pause glyph,
+#                          indexed by sys.linevibrator_type. Without it mode 1
+#                          has nothing to render, so "static AOD" silently falls
+#                          back to stock fade-to-black no matter what the app is
+#                          set to. (Dropped by accident 2026-08-13; every build
+#                          for a day was overlay-only and static looked broken.)
+#   A9_DISABLE_COLORFADE=0 Skip the runtime switch. Despite the name this does
+#                          not hard-disable anything: it rewrites every read of
+#                          DisplayPowerController.mColorFadeEnabled to consult
+#                          sys.linevibrator_type, so 96 means "overlay AOD, do
+#                          not run ColorFade" and any real index means "run it".
+#                          That is what makes the two modes switchable at all.
+#
+#   With both on, one image carries mode 1 and mode 2 and the app chooses at
+#   runtime. With only PATCH, ColorFade always runs and the overlay AOD is
+#   painted over. With only DISABLE, mode 1 has no shader to draw.
+#
 #   A9_PATCH_SERVICES=0    Skip services.jar entirely (stock framework).
 #
 # ------------------------------------------------------------- two AODs -----
@@ -135,8 +155,8 @@ exec sudo env \
   A9_PATCH_DIALER="${A9_PATCH_DIALER:-0}" \
   A9_PATCH_TREBLEAPP="${A9_PATCH_TREBLEAPP:-0}" \
   A9_PATCH_VIBRATOR="${A9_PATCH_VIBRATOR:-1}" \
-  A9_PATCH_COLORFADE="${A9_PATCH_COLORFADE:-0}" \
-  A9_DISABLE_COLORFADE="${A9_DISABLE_COLORFADE:-0}" \
+  A9_PATCH_COLORFADE="${A9_PATCH_COLORFADE:-1}" \
+  A9_DISABLE_COLORFADE="${A9_DISABLE_COLORFADE:-1}" \
   A9_PATCH_TREBLE_OVERLAY="${A9_PATCH_TREBLE_OVERLAY:-1}" \
   A9_PATCH_SERVICES="${A9_PATCH_SERVICES:-1}" \
   python3 patch_system_img.py "$IMG"
