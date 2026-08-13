@@ -28,10 +28,18 @@
 #                          declares a sharedUserId, so on any other base this
 #                          BOOTLOOPS with "Signature mismatch on system package
 #                          me.phh.treble.app for shared user". TESTKEY ONLY.
-#   A9_PATCH_VIBRATOR=1    BROKEN ON A16. Emits Vibration->callerInfo, removed
-#                          in A16. Boots fine, then the first haptic event
-#                          (opening the app drawer) throws NoSuchFieldError in
-#                          system_server and soft-reboots the device.
+#   A9_PATCH_VIBRATOR=0    Skip the haptics patch. DEFAULTS ON since 2026-08-13.
+#                          It writes the A9's three LRA waveforms into vndk.rc
+#                          and routes startVibrationLocked to them by
+#                          VibrationAttributes usage. Turning it off also drops
+#                          the waveforms, since add_pattern_to_initrc is called
+#                          from patch_startVibrationLocked -- so "off" means no
+#                          custom haptics at all.
+#                          It was off 2026-08-11..13 after soft-rebooting the
+#                          device on the first haptic. Cause was NOT a removed
+#                          field: callerInfo was RETYPED (Vibration$CallerInfo
+#                          -> VibrationSession$CallerInfo) and the parameter
+#                          became SingleVibrationSession. Both are handled now.
 #   A9_PATCH_COLORFADE=1   v3.x shader static AOD: 96 SHADER_LIST variants,
 #                          moon/pause glyph, index read from
 #                          sys.linevibrator_type. Retains your LAST SCREEN.
@@ -123,7 +131,7 @@ exec sudo env \
   A9_PATCH_SYSTEMUI="${A9_PATCH_SYSTEMUI:-0}" \
   A9_PATCH_DIALER="${A9_PATCH_DIALER:-0}" \
   A9_PATCH_TREBLEAPP="${A9_PATCH_TREBLEAPP:-0}" \
-  A9_PATCH_VIBRATOR="${A9_PATCH_VIBRATOR:-0}" \
+  A9_PATCH_VIBRATOR="${A9_PATCH_VIBRATOR:-1}" \
   A9_PATCH_COLORFADE="${A9_PATCH_COLORFADE:-0}" \
   A9_DISABLE_COLORFADE="${A9_DISABLE_COLORFADE:-0}" \
   A9_PATCH_TREBLE_OVERLAY="${A9_PATCH_TREBLE_OVERLAY:-1}" \

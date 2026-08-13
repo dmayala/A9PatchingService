@@ -442,10 +442,32 @@ def patch_services_jar():
         new_method.name = "tempStartVibrationLocked"
         method.parent.items.append(('method', new_method))
         method.name = "originalStartVibrationLocked"
+        # A16: reaching the VibrationAttributes changed shape twice.
+        #
+        #   A14   startVibrationLocked(Vibration p1)
+        #           p1.callerInfo                  : Vibration$CallerInfo
+        #   A16   startVibrationLocked(SingleVibrationSession p1)
+        #           p1.getCallerInfo()             : VibrationSession$CallerInfo
+        #
+        # The field was never deleted -- it was RETYPED, from Vibration$CallerInfo
+        # to VibrationSession$CallerInfo, and dex field resolution includes the
+        # type. That is why the old patch assembled cleanly, booted, and then
+        # threw on the first haptic event:
+        #   NoSuchFieldError: No field callerInfo of type
+        #     Lcom/android/server/vibrator/Vibration$CallerInfo;
+        # which soft-rebooted the device.
+        #
+        # p1's type is read from the method signature rather than hardcoded, so
+        # a future rename of the session class does not silently reintroduce the
+        # same class of failure. CallerInfo.attrs itself is unchanged.
+        session_type = method.parameters.strip()
+        caller_info = f'{method.parent.base_dir}/VibrationSession$CallerInfo;'
+
         new_method.add_instruction('.locals 5')
         for instruction in [
-            f'iget-object v0, p1, {method.parent.base_dir}/Vibration;->callerInfo:{method.parent.base_dir}/Vibration$CallerInfo;',
-            f'iget-object v0, v0, {method.parent.base_dir}/Vibration$CallerInfo;->attrs:Landroid/os/VibrationAttributes;',
+            f'invoke-virtual {{p1}}, {session_type}->getCallerInfo(){caller_info}',
+            'move-result-object v0',
+            f'iget-object v0, v0, {caller_info}->attrs:Landroid/os/VibrationAttributes;',
             'invoke-virtual {v0}, Landroid/os/VibrationAttributes;->getUsage()I',
             'move-result v0',
             'const/16 v1, 0x0',
@@ -1360,18 +1382,27 @@ def patch_services_jar():
                 ]
             ),
             FilePatch(
-                # BROKEN ON ANDROID 16 — disabled by default (2026-08-11).
-                # patch_startVibrationLocked emits
-                #   iget-object v0, p1, .../Vibration;->callerInfo:.../Vibration$CallerInfo;
-                # but A16 removed that field. The patch assembles fine and the
-                # device boots, then ANY haptic feedback (e.g. opening the app
-                # drawer) throws in system_server and soft-reboots the device:
-                #   java.lang.NoSuchFieldError: No field callerInfo of type
-                #     Lcom/android/server/vibrator/Vibration$CallerInfo;
-                #     at VibratorManagerService.startVibrationLocked
-                # Re-enable only after re-porting against A16's Vibration class.
-                file_patterns = ([r"Vibrator(Manager)?Service\.smali"]
-                                 if os.environ.get("A9_PATCH_VIBRATOR") == "1" else []),
+                # A16-ported 2026-08-13, and ON by default again.
+                #
+                # This is what drives the A9's LRA: it writes three waveform
+                # patterns into vndk.rc and rewrites startVibrationLocked to
+                # select between them via sys.linevibrator_on, keyed on the
+                # vibration's VibrationAttributes usage (ring/notification vs
+                # touch/hardware feedback). Without it the device has NO custom
+                # haptics at all -- note add_pattern_to_initrc is called from
+                # patch_startVibrationLocked, so disabling this also drops the
+                # vndk.rc waveforms.
+                #
+                # It was off between 2026-08-11 and 2026-08-13 because it
+                # soft-rebooted the device on the first haptic event. See the
+                # comment in patch_startVibrationLocked: the cause was a RETYPED
+                # callerInfo field plus a changed parameter type, not a removed
+                # field as originally diagnosed.
+                #
+                # sys.linevibrator_on is u:object_r:system_prop:s0 -- writable by
+                # system_server, where this code runs, though not from a shell.
+                file_patterns = ([] if os.environ.get("A9_PATCH_VIBRATOR", "1") == "0"
+                                 else [r"Vibrator(Manager)?Service\.smali"]),
                 patches = [
                     InstructionPatch(
                         instruction = InstructionDetails(
