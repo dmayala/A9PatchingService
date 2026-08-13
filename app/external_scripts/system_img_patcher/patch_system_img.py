@@ -2139,8 +2139,78 @@ def update_build_prop():
             if key not in set([line.split("=")[0] for line in lines]):
                 file.write(f"{key}={value}\n")
 
+FIRSTBOOT_SCRIPT = r"""#!/system/bin/sh
+# A9 first-boot setup. Run from vndk.rc on sys.boot_completed=1.
+#
+# WHY A SCRIPT AND NOT AN INLINE COMMAND. Android's init splits a command line
+# on whitespace and only treats DOUBLE quotes as grouping -- single quotes are
+# not special to it. So an inline
+#     exec_background ... -- /system/bin/sh -c 'a b c'
+# reaches sh as the fragments 'a / b / c' and silently does nothing. Simple
+# unquoted commands in the same block (cmd overlay enable, appops set, chmod)
+# work fine, which is what made this hard to spot: measured on a clean first
+# boot, every simple hook had run and every quoted one had not.
+#
+# This also fixes the long-standing accessibility auto-enable, which never
+# worked on a freshly wiped /data for the same reason -- on an already-set-up
+# device the value was already present, so it looked fine.
+
+SVC="com.lmqr.ha9_comp_service/.A9AccessibilityService"
+
+i=0
+while [ $i -lt 24 ]; do
+    cur=$(settings get secure enabled_accessibility_services 2>/dev/null)
+
+    # `settings get` prints the literal string "null" for an unset key, NOT an
+    # empty string. Treating "null" as a real value builds the malformed list
+    # "null:com.lmqr..." and the service never starts.
+    if [ "$cur" = "null" ] || [ -z "$cur" ]; then
+        upd="$SVC"
+    elif echo "$cur" | grep -q -F "$SVC"; then
+        upd="$cur"
+    else
+        upd="$cur:$SVC"
+    fi
+
+    settings put secure enabled_accessibility_services "$upd" 2>/dev/null
+    # The list alone is not enough; without this the service stays dormant.
+    settings put secure accessibility_enabled 1 2>/dev/null
+
+    chk=$(settings get secure enabled_accessibility_services 2>/dev/null)
+    if echo "$chk" | grep -q -F "$SVC"; then
+        break
+    fi
+
+    # Retry: on a freshly wiped, FBE-encrypted device the settings provider is
+    # not necessarily writable the instant sys.boot_completed fires.
+    i=$((i + 1))
+    sleep 5
+done
+
+# Light theme on first boot only. This ROM comes up in dark mode on a clean
+# /data, which is wrong for a bistable E Ink panel -- it inverts most of the UI
+# to a large black area that is slower to redraw and ghosts more. Only applied
+# when unset, so a deliberate later choice is not overwritten every reboot.
+night=$(settings get secure ui_night_mode 2>/dev/null)
+if [ "$night" = "null" ] || [ -z "$night" ]; then
+    settings put secure ui_night_mode 1 2>/dev/null
+    cmd uimode night no 2>/dev/null
+fi
+"""
+
+
+def install_firstboot_script():
+    path = "d/system/bin/a9-firstboot.sh"
+    with open(path, "w") as fh:
+        fh.write(FIRSTBOOT_SCRIPT)
+    os.chmod(path, 0o755)
+    run_command(f"setfattr -n security.selinux -v u:object_r:phhsu_exec:s0 {path}")
+    logging.info("Installed /system/bin/a9-firstboot.sh")
+
+
 def update_vndk_rc():
     logging.info("Updating vndk init script...")
+    install_firstboot_script()
     vndk_rc_path = "d/system/etc/init/vndk.rc"
     with open(vndk_rc_path, "r") as file:
         lines = file.readlines()
@@ -2149,18 +2219,11 @@ def update_vndk_rc():
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/cmd overlay enable me.phh.treble.overlay.misc.aod_systemui\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/service call SurfaceFlinger 1008 i32 1\n",
         "    start a9_eink_server\n",
-        "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/sh -c 'existing=$(/system/bin/settings get secure enabled_accessibility_services); new_service=\"com.lmqr.ha9_comp_service/.A9AccessibilityService\"; if ! echo \"$existing\" | /system/bin/grep -q -F \"$new_service\"; then if [ -n \"$existing\" ]; then updated=\"$existing:$new_service\"; else updated=\"$new_service\"; fi; /system/bin/settings put secure enabled_accessibility_services \"$updated\"; fi'\n",
+        # First-boot setup: accessibility auto-enable + light theme.
+        # MUST stay a single unquoted command -- see FIRSTBOOT_SCRIPT for why an
+        # inline `sh -c '...'` silently does nothing under init.
+        "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/sh /system/bin/a9-firstboot.sh\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/appops set com.lmqr.ha9_comp_service SYSTEM_ALERT_WINDOW allow\n",
-        # Force light theme on first boot. This ROM defaults to dark mode
-        # ("Night mode: yes" on a freshly wiped /data), which is wrong for a
-        # bistable E Ink panel -- it inverts most of the UI to a large black
-        # area, which is slower to redraw, ghosts more and wastes the panel's
-        # contrast. It also skews screenshot-diff testing.
-        #
-        # ui_night_mode: 1 = MODE_NIGHT_NO, 2 = MODE_NIGHT_YES.
-        # Only applied when unset, so a deliberate later choice is not
-        # overwritten on every reboot.
-        "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/sh -c 'cur=$(/system/bin/settings get secure ui_night_mode); if [ \"$cur\" = \"null\" ] || [ -z \"$cur\" ]; then /system/bin/settings put secure ui_night_mode 1; /system/bin/cmd uimode night no; fi'\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/chmod 444 /sys/class/leds/aw99703-bl-1/brightness\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/chmod 444 /sys/class/leds/aw99703-bl-2/brightness\n",
         "    exec_background u:r:phhsu_daemon:s0 root -- /system/bin/chown root:root /sys/class/leds/aw99703-bl-1/brightness\n",
