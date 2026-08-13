@@ -5,11 +5,19 @@
 #
 #   ./tools/finalize-image.sh out.img [shader-index] [path/to/a9_eink_server]
 #
-# 1. adb/root properties. ALWAYS. Flashing an image without these can leave the
-#    device unreachable: on a `user` build USB debugging is off, so if the panel
-#    is not usable there is no way in except the hardware key combo.
+# 1. adb/root properties. ON BY DEFAULT, and you want them for any image you
+#    intend to debug: flashing without them can leave the device unreachable,
+#    because on a `user` build USB debugging is off and if the panel is not
+#    usable there is no way in except the hardware key combo.
 #    (On some bases these are overridden earlier in the property load order and
-#    will not take effect - verify with `adb shell getprop ro.debuggable`.)
+#    will not take effect - verify with `adb shell getprop ro.debuggable`.
+#    Measured on LineageOS 23.2: ro.debuggable stays 0 and `adb root` is
+#    refused, so on that base these buy less than they appear to.)
+#
+#    A9_RELEASE=1 skips them. Use it for anything handed to another person: a
+#    public image should not ship with ro.secure=0, ro.adb.secure=0 and USB
+#    defaulting to adb. The recipient turns on USB debugging in Developer
+#    Options like on any other phone.
 #
 # 2. a9_eink_server. Two builds exist and they pair with different app versions:
 #      47224 B (May 2024)  - no stl/wov commands; pairs with a9service v1.4.1
@@ -63,14 +71,19 @@ cleanup() { sudo umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || 
 trap cleanup EXIT
 
 BP="$MNT/system/build.prop"
-for kv in ro.build.type=userdebug ro.debuggable=1 ro.secure=0 ro.adb.secure=0 persist.sys.usb.config=adb; do
-  k="${kv%%=*}"; ek="$(printf '%s' "$k" | sed 's/\./\\./g')"
-  if sudo grep -q "^$ek=" "$BP"; then
-    sudo sed -i "s|^$ek=.*|$kv|" "$BP"
-  else
-    echo "$kv" | sudo tee -a "$BP" >/dev/null
-  fi
-done
+RELEASE="${A9_RELEASE:-0}"
+if [ "$RELEASE" = "1" ]; then
+  echo "A9_RELEASE=1: NOT baking adb/root properties (release image)"
+else
+  for kv in ro.build.type=userdebug ro.debuggable=1 ro.secure=0 ro.adb.secure=0 persist.sys.usb.config=adb; do
+    k="${kv%%=*}"; ek="$(printf '%s' "$k" | sed 's/\./\\./g')"
+    if sudo grep -q "^$ek=" "$BP"; then
+      sudo sed -i "s|^$ek=.*|$kv|" "$BP"
+    else
+      echo "$kv" | sudo tee -a "$BP" >/dev/null
+    fi
+  done
+fi
 
 V="$MNT/system/etc/init/vndk.rc"
 if sudo grep -q "sys.linevibrator_type" "$V"; then
@@ -104,7 +117,15 @@ if [ -n "$DAEMON" ]; then
 fi
 
 echo "--- verification ---"
-printf 'adb props    : %s/5\n' "$(sudo grep -cE '^(ro\.build\.type=userdebug|ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP")"
+if [ "$RELEASE" = "1" ]; then
+  # Report what the BASE ships, so a stray debug prop in the base cannot slip
+  # into a release image unnoticed.
+  printf 'adb props    : SKIPPED (release); base has %s debug prop(s)\n' \
+    "$(sudo grep -cE '^(ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP" || true)"
+  printf 'build type   : %s\n' "$(sudo grep -m1 '^ro.build.type=' "$BP" || echo '<unset>')"
+else
+  printf 'adb props    : %s/5\n' "$(sudo grep -cE '^(ro\.build\.type=userdebug|ro\.debuggable=1|ro\.secure=0|ro\.adb\.secure=0|persist\.sys\.usb\.config=adb)$' "$BP")"
+fi
 printf 'aod override : %s\n' "${MODE:-<unset - app drives via stl sentinel>}"
 printf 'shader index : %s\n'   "$(sudo grep -oE 'setprop sys\.linevibrator_type [0-9]+' "$V" | head -1)"
 printf 'a9_eink_server: %s\n'  "$(sudo stat -c%s "$MNT/system/bin/a9_eink_server")"
