@@ -113,6 +113,146 @@ def add_a9ColorFadeEnabled_helper(smali_file):
     ))
 
 
+# --------------------------------------------------------------------------
+# ScrimState -- A16 retarget
+# --------------------------------------------------------------------------
+#
+# The scrim is the dimming layer SystemUI draws over the wallpaper on the
+# lockscreen and AOD. On an E Ink panel it is pure loss: it greys the whole
+# screen with no benefit, since there is no backlight to soften. Zero the
+# alphas and the panel renders clean white.
+#
+# WHY THIS ROTTED. The Android 14 patch looked for the enum constant's NAME
+# ("AOD", "KEYGUARD") inside a method named `<init>`, then searched the same
+# class for the field write. On A16 the names only ever appear in ScrimState's
+# static initialiser `<clinit>`, which builds each constant as an anonymous
+# subclass -- ScrimState$1 .. ScrimState$12 -- and the field writes live in
+# those subclasses' `prepare()`. Nothing matched, in any of 13 files.
+#
+# The subclass numbering is an R8 artefact and must not be hardcoded: it shifts
+# whenever the enum gains or loses a constant. So derive the mapping from
+# `<clinit>` at patch time by pairing registers:
+#
+#     new-instance v7, Lcom/.../ScrimState$7;      <- register v7
+#     const-string v8, "AOD"
+#     invoke-direct {v7, v8, v9}, ...
+#     sput-object v7, Lcom/.../ScrimState;->AOD:   <- same register v7
+#
+# Pairing by ORDER instead of by register gets this wrong: there are 13 name
+# constants for 12 subclasses (UNINITIALIZED is the base instance, not a
+# subclass), so an ordered zip is off by one and silently mislabels every state.
+SCRIM_TARGETS = {
+    "AOD":      {"mFrontAlpha": "0x0", "mFrontTint": "0x0"},
+    "KEYGUARD": {"mBehindAlpha": "0x0", "mBehindTint": "0x0", "mNotifAlpha": "0x0"},
+}
+
+_scrim_enum_map = None
+SCRIM_APPLIED = {}
+
+
+def scrim_enum_map():
+    """{'AOD': '7', 'KEYGUARD': '2', ...} parsed from ScrimState.<clinit>."""
+    global _scrim_enum_map
+    if _scrim_enum_map is not None:
+        return _scrim_enum_map
+
+    _scrim_enum_map = {}
+    path = None
+    for root, dirs, files in os.walk("."):
+        if "ScrimState.smali" in files:
+            path = os.path.join(root, "ScrimState.smali")
+            break
+    if path is None:
+        logging.error("ScrimState.smali not found - cannot map scrim enum constants")
+        return _scrim_enum_map
+
+    with open(path) as fh:
+        content = fh.read()
+    start = content.find(".method static constructor <clinit>")
+    if start == -1:
+        logging.error("ScrimState.smali has no <clinit>")
+        return _scrim_enum_map
+    clinit = content[start:content.index(".end method", start)]
+
+    pending = {}
+    for line in clinit.splitlines():
+        line = line.strip()
+        m = re.match(r'new-instance ([vp]\d+), L[\w/$]*ScrimState\$(\d+);', line)
+        if m:
+            pending[m.group(1)] = m.group(2)
+            continue
+        m = re.match(r'sput-object ([vp]\d+), L[\w/$]*ScrimState;->(\w+):', line)
+        if m and m.group(1) in pending:
+            _scrim_enum_map[m.group(2)] = pending.pop(m.group(1))
+
+    logging.info(f"ScrimState enum map: "
+                 f"{ {k: v for k, v in _scrim_enum_map.items() if k in SCRIM_TARGETS} }")
+    return _scrim_enum_map
+
+
+def patch_ScrimStates(smali_file):
+    """Zero the scrim alpha/tint for the AOD and KEYGUARD states."""
+    cls = smali_file.smali_class
+    if cls is None:
+        return
+    m = re.search(r'ScrimState\$(\d+);', cls.class_name or "")
+    if not m:
+        return
+
+    subclass = m.group(1)
+    name = next((k for k, v in scrim_enum_map().items() if v == subclass), None)
+    if name not in SCRIM_TARGETS:
+        return
+
+    for field, value in SCRIM_TARGETS[name].items():
+        # Insert `const <reg>, 0` immediately before the write. Each write in
+        # prepare() is preceded by its own iget into the same register, so
+        # clobbering it there cannot disturb a neighbouring write.
+        #
+        # One deliberate exception: in the AOD state mFrontTint and mBehindTint
+        # are written from the SAME register (both take mBackgroundColor), so
+        # zeroing it for mFrontTint also zeroes mBehindTint. Harmless -- AOD
+        # sets mBehindAlpha to 0, and a tint with zero alpha draws nothing.
+        def act(instruction, value=value, field=field, name=name):
+            instruction.insert_before(
+                f"const{instruction.modifier} {instruction.registers[0]}, {value}")
+            SCRIM_APPLIED[(name, field)] = SCRIM_APPLIED.get((name, field), 0) + 1
+
+        cls.for_method(
+            MethodDetails(name="prepare"),
+            lambda method, field=field, act=act: method.for_instruction(
+                InstructionDetails(
+                    instruction_type=InstructionType.FIELD_WRITE,
+                    field_name=field,
+                ),
+                act
+            )
+        )
+
+
+def verify_scrim_patches():
+    """Fail loudly if a scrim target silently stopped matching.
+
+    The generic ZERO-MATCH counter cannot see this: patch_ScrimStates is invoked
+    once per ScrimState$N file and returns early for the ten states we do not
+    care about, so it always "fires". Check the real targets instead.
+    """
+    missing = [f"{enum}.{field}"
+               for enum, fields in SCRIM_TARGETS.items()
+               for field in fields
+               if not SCRIM_APPLIED.get((enum, field))]
+    if missing:
+        logging.error(f"[ZERO-MATCH] ScrimState targets never patched: {missing}")
+    else:
+        logging.info(f"ScrimState: all {len(SCRIM_APPLIED)} targets patched "
+                     f"({dict(SCRIM_APPLIED)})")
+    PATCH_REPORT.append({
+        "patterns": "ScrimState (A16 retarget)", "files": len(SCRIM_APPLIED),
+        "patch": 0, "action": "patch_ScrimStates",
+        "fired": sum(SCRIM_APPLIED.values()),
+    })
+
+
 def patch_ColorFadeEnabledFromProp(instruction):
     """Replace a read of mColorFadeEnabled with a call to the helper above."""
     cls = instruction.parent.parent.class_name
@@ -1182,8 +1322,16 @@ def patch_services_jar():
                     ),
                 ]
             ),
+            # OBSOLETE ON A16 -- disabled, nothing left to patch.
+            #
+            # This neutered ObjectAnimator/ValueAnimator .start() calls in the
+            # framework's wallpaper classes. A16's services.jar still has 86
+            # *Wallpaper*.smali files but ZERO references to android/animation/
+            # in any of them -- WallpaperManagerService no longer animates.
+            # (The equivalent patch inside SystemUI still fires; only this
+            # services.jar copy is dead.)
             FilePatch(
-                file_patterns = [r".*[Ww]allpaper.*\.smali"],
+                file_patterns = [],
                 patches = [
                     InstructionPatch(
                         instruction = InstructionDetails(
@@ -1242,8 +1390,24 @@ def patch_services_jar():
                     ),
                 ]
             ),
+            # OBSOLETE ON A16 -- disabled. This is a TUNING choice, not a
+            # mechanical port; re-enable deliberately, not reflexively.
+            #
+            # It amplified the A9's weak haptics by rewriting each static
+            # SCALE_FACTOR_* constant to (x**2 + 0.3). A16 deleted those
+            # constants -- VibrationScaler now has three instance fields and no
+            # float constants at all. The scale factor is computed in
+            # scaleLevelToScaleFactor(int level) as
+            #
+            #     Math.pow(mVibrationConfig.getDefaultVibrationScaleLevelGain(),
+            #              level)                       // level in [-2, 2]
+            #
+            # so the A16 equivalent knob is that gain, not a table of constants.
+            # Raising it (e.g. 1.4 -> 1.8 takes level 2 from 1.96x to 3.24x) would
+            # reproduce the intent, but how strong the haptics *should* be is a
+            # judgement call, so it is left alone rather than guessed at.
             FilePatch(
-                file_patterns = [r"VibrationScaler\.smali"],
+                file_patterns = [],
                 patches = [
                     InstructionPatch(
                         field = FieldDetails(
@@ -1363,18 +1527,8 @@ def patch_services_jar():
     ).patch()
 
 def patch_systemui():
-    values_per_scrim_enum = {
-        "AOD": {
-            "mFrontAlpha": "0x0",
-            "mFrontTint": "0x0",
-        },
-        "KEYGUARD": {
-            "mBehindAlpha": "0x0",
-            "mBehindTint": "0x0",
-            "mNotifAlpha": "0X0",
-        },
-    }
-    scrim_enum_triples = list((key1, key2, value) for key1, nested_dict in values_per_scrim_enum.items() for key2, value in nested_dict.items())
+    # The scrim alpha/tint values moved to SCRIM_TARGETS at module scope, next
+    # to patch_ScrimStates -- the A16 retarget needs them outside this function.
     wallpaper_flag_count = 0
     def patch_WallpaperFlags(instruction):
         nonlocal wallpaper_flag_count
@@ -1531,16 +1685,49 @@ def patch_systemui():
                     ),
                 ],
             ),
+            # Make the AOD clock render exactly like the lockscreen clock.
+            #
+            # On A14 this was AnimatableClockView, whose dozingWeight/dozingColor
+            # field reads were rewritten to lockScreenWeight/lockScreenColor.
+            # A16 deleted AnimatableClockView entirely -- the clock is now
+            # DigitalClockTextView (customization/clocks/view), and the choice is
+            # a set of parallel ternaries in animateDoze(Z isDozing, Z animate):
+            #
+            #   fontVariation = isDozing ? fontVariations.doze : fontVariations.lockscreen
+            #   color         = isDozing ? aodColor            : lockscreenColor
+            #   textSize      = isDozing ? aodFontSizePx       : lockScreenPaint.getTextSize()
+            #
+            # Rewriting the two doze-branch reads to their lockscreen
+            # counterparts is the same edit as before: the AOD clock gets the
+            # lockscreen's font weight and full-black colour instead of the thin,
+            # dimmed doze variant, which is what an E Ink panel needs to stay
+            # legible. Types match exactly (I and Ljava/lang/String;).
+            #
+            # Font SIZE is deliberately left alone -- the A14 patch only ever
+            # touched weight and colour, and forcing the larger lockscreen size
+            # into the AOD layout risks clipping.
             FilePatch(
-                file_patterns = [r".*Clock.*\.smali"],
+                file_patterns = [r"DigitalClockTextView\.smali"],
                 patches = [
                     InstructionPatch(
+                        method = "animateDoze",
                         instruction = InstructionDetails(
                             instruction_type = InstructionType.FIELD_READ,
-                            field_name = Matcher.regex(r'm?[Dd]oz(e|ing)([wW]eight|[cC]olor)'),
+                            field_name = "aodColor",
+                            data_type = "I",
                         ),
-                        action = lambda inst: setattr(inst, 'field_name', re.sub(r'm?[Dd]oz(e|ing)', 'lockScreen', inst.field_name))
-                    )
+                        action = lambda inst: setattr(inst, 'field_name', 'lockscreenColor')
+                    ),
+                    InstructionPatch(
+                        method = "animateDoze",
+                        instruction = InstructionDetails(
+                            instruction_type = InstructionType.FIELD_READ,
+                            field_name = "doze",
+                            data_type = "Ljava/lang/String;",
+                            class_name = Matcher.regex(r'.*\$FontVariations;'),
+                        ),
+                        action = lambda inst: setattr(inst, 'field_name', 'lockscreen')
+                    ),
                 ]
             ),
             FilePatch(
@@ -1558,14 +1745,23 @@ def patch_systemui():
                             f"move-result-object {inst.registers[0]}",
                         ])
                     ),
-                    InstructionPatch(
-                        instruction = InstructionDetails(
-                            instruction_type = InstructionType.FIELD_READ,
-                            field_name = Matcher.regex(r'[a-zA-Z]*(D|d)arkAmount'),
-                            data_type = "F",
-                        ),
-                        action = lambda inst: inst.replace(f"const {inst.registers[0]}, 0x0")
-                    )
+                    # REMOVED ON A16: the darkAmount patch. Do not reinstate it
+                    # without re-checking the read sites.
+                    #
+                    # It zeroed darkAmount reads so keyguard views rendered as if
+                    # not dozing. On A16 the field survives only as
+                    # mInterpolatedDarkAmount / mLinearDarkAmount, and all three
+                    # remaining read sites are outside keyguard:
+                    #   NotificationPanelViewController.dump()        x2  debug only
+                    #   NotificationStackScrollLayout
+                    #       .notifyHeightChangeListener()             x1  behavioural
+                    #
+                    # The behavioural one is
+                    #     if (needsAnimation && mInterpolatedDarkAmount == 0f)
+                    #         mAnimateNextPositionUpdate = true;
+                    # so forcing that read to 0 makes the comparison true and
+                    # ENABLES an animation -- the opposite of what we want on E
+                    # Ink. Patching this would be worse than leaving it alone.
                 ]
             ),
             FilePatch(
@@ -1594,8 +1790,22 @@ def patch_systemui():
                     )
                 ]
             ),
+            # REDUNDANT ON A16 -- disabled, and the work is already done elsewhere.
+            #
+            # This no-op'd NotificationDozeHelper.updateGrayscale so notification
+            # icons were not desaturated while dozing. On A16 R8 has reduced
+            # NotificationDozeHelper to a single field and NO methods; the
+            # grayscale maths was inlined into
+            # StatusBarIconView.updateIconColor(), where it is driven by
+            # mDozeAmount:
+            #     interpolateColors(mCurrentSetColor, mDozeAmount, WHITE)
+            #     saturation = mDozeAmount * 0.67f
+            #
+            # StatusBarIconView.smali matches the `.*Icon.*` group below, whose
+            # mDozeAmount patch DOES still fire -- so the icons already come out
+            # unsaturated. Re-adding a patch here would be a no-op at best.
             FilePatch(
-                file_patterns = [r".*Notification.*Doze.*\.smali"],
+                file_patterns = [],
                 patches = [
                     InstructionPatch(
                         method = "updateGrayscale",
@@ -1603,24 +1813,14 @@ def patch_systemui():
                     )
                 ]
             ),
+            # A16 retarget -- see SCRIM_TARGETS / patch_ScrimStates. The enum
+            # constants are built in ScrimState.<clinit> as anonymous subclasses,
+            # so match the subclasses and resolve which state each one is.
             FilePatch(
-                file_patterns = [r".*ScrimState.*\.smali"],
-                patches = list(
-                    InstructionPatch(
-                        method = "<init>",
-                        instruction = InstructionDetails(
-                          instruction_type = InstructionType.CONSTANT,
-                          constant_value = Matcher.regex(rf'"?{enum}"?'),
-                        ),
-                        action = lambda inst, key=key, value=value: inst.parent.parent.for_instruction(
-                            InstructionDetails(
-                              instruction_type = InstructionType.FIELD_WRITE,
-                              field_name = key,
-                            ),
-                            lambda nested_insr, value=value: nested_insr.insert_before(f"const{nested_insr.modifier} {nested_insr.registers[0]}, {value}")
-                        )
-                    ) for (enum, key, value) in scrim_enum_triples
-                )
+                file_patterns = [r"ScrimState\$\d+\.smali"],
+                patches = [
+                    InstructionPatch(action = patch_ScrimStates),
+                ]
             ),
             FilePatch(
                 file_patterns = [
@@ -1661,6 +1861,8 @@ def patch_systemui():
                     )
                 ]
             ),
+            # Runs last: reports whether every ScrimState target actually landed.
+            FunctionPatch(verify_scrim_patches),
         ]
     ).patch(install = ["d/system/system_ext/priv-app/SystemUI/SystemUI.apk"], sign = True)
 
