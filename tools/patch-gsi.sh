@@ -19,9 +19,10 @@
 # either broken on Android 16 or mutually exclusive with another.
 #
 #   A9_PATCH_SYSTEMUI=1    SystemUI.apk patches (AOD scrims, doze sensors,
-#                          ImageWallpaper ambient redraw). Re-signed with the
-#                          AOSP platform test key => TESTKEY-SIGNED BASES ONLY.
-#   A9_PATCH_DIALER=1      Dialer tint. Same restriction.
+#                          ImageWallpaper ambient redraw). Re-signed with
+#                          A9_SIGN_KEY. NO LONGER RESTRICTED TO TESTKEY BASES --
+#                          see "re-signing" below.
+#   A9_PATCH_DIALER=1      Dialer tint. Same mechanism.
 #   A9_PATCH_TREBLEAPP=1   Replace TrebleApp.apk + treble overlay. Both are
 #                          pre-signed with the AOSP test key. me.phh.treble.app
 #                          declares a sharedUserId, so on any other base this
@@ -55,6 +56,32 @@
 #              SurfaceFlinger keeps compositing; on a full screen-off it stops
 #              before the overlay is drawn and the panel latches the old frame.
 #
+# ---------------------------------------------------------- re-signing ------
+# Patching SystemUI.apk means repacking and re-signing it, and we do not hold
+# the base GSI's platform key (LineageOS 23.2 builds are signed by crDroid).
+# Previously that made A9_PATCH_SYSTEMUI testkey-bases-only. It no longer is.
+#
+# When any package is re-signed the patcher automatically also:
+#   1. patches AppIdPermissionPolicy.shouldGrantPermissionBySignature in
+#      services.jar to grant that package its signature permissions by NAME
+#      rather than by certificate, and
+#   2. adds A9_SIGN_CERT to /system/etc/selinux/plat_mac_permissions.xml with
+#      seinfo="platform", so it stays in the platform_app SELinux domain.
+# Both are required; the patcher refuses to build with A9_PATCH_SERVICES=0.
+#
+# The sharedUserId problem that makes TrebleApp fatal does NOT apply to
+# SystemUI: it declares android.uid.systemui, not android.uid.system, and it is
+# the only member of it.
+#
+#   A9_SIGN_KEY / A9_SIGN_CERT   default to this repo's AOSP platform TEST key.
+#      Override with a private key. The test key's private half is published in
+#      AOSP, so entering its certificate into plat_mac_permissions.xml would put
+#      any APK signed with it into the platform SELinux domain.
+#
+#   A9_SIGN_KEY=/home/nixos/A9/keys/daniel.pk8 \
+#   A9_SIGN_CERT=/home/nixos/A9/keys/daniel.x509.pem \
+#   A9_PATCH_SYSTEMUI=1 ./tools/patch-gsi.sh base.img
+#
 set -euo pipefail
 
 IMG="${1:?usage: patch-gsi.sh /path/to/system.img}"
@@ -84,8 +111,15 @@ done
 cd "$PATCHER"
 sudo rm -rf TMP patch-report.json system_patched.img
 
+# The patcher chdir's into TMP, so a relative key path would break. Absolutise
+# whatever the caller gave us; the defaults are already TMP-relative ("../").
+SIGN_KEY="${A9_SIGN_KEY:+$(readlink -f "$A9_SIGN_KEY")}"
+SIGN_CERT="${A9_SIGN_CERT:+$(readlink -f "$A9_SIGN_CERT")}"
+
 exec sudo env \
   PATH="$BIN:$PATH" \
+  ${SIGN_KEY:+A9_SIGN_KEY="$SIGN_KEY"} \
+  ${SIGN_CERT:+A9_SIGN_CERT="$SIGN_CERT"} \
   A9_PATCH_SYSTEMUI="${A9_PATCH_SYSTEMUI:-0}" \
   A9_PATCH_DIALER="${A9_PATCH_DIALER:-0}" \
   A9_PATCH_TREBLEAPP="${A9_PATCH_TREBLEAPP:-0}" \

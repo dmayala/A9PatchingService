@@ -2,6 +2,7 @@ from smali_patcher import *
 import sys
 import re
 import os
+import base64
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -119,6 +120,132 @@ def patch_ColorFadeEnabledFromProp(instruction):
         f'invoke-static {{}}, {cls}->a9ColorFadeEnabled()Z',
     ])
     instruction.replace(f'move-result {instruction.registers[0]}')
+
+
+# --------------------------------------------------------------------------
+# Re-signing system apps on a base we do not hold the platform key for
+# --------------------------------------------------------------------------
+#
+# Packages we re-sign with our own key (see SIGN_KEY in smali_patcher.py) and
+# must therefore rescue in the permission engine. Built from the gates, because
+# a package listed here is granted its signature permissions unconditionally --
+# there is no reason to widen that to an app we did not actually touch.
+def resigned_packages():
+    pkgs = []
+    if os.environ.get("A9_PATCH_SYSTEMUI") == "1":
+        pkgs.append("com.android.systemui")
+    if os.environ.get("A9_PATCH_DIALER") == "1":
+        # LineageOS ships the AOSP dialer under its own package name.
+        pkgs += ["com.android.dialer", "com.google.android.dialer"]
+    return pkgs
+
+
+def patch_AppIdPermissionPolicy(method):
+    """Grant signature-protected permissions to packages we re-signed ourselves.
+
+    THE PROBLEM. Patching SystemUI.apk means repacking and re-signing it, and we
+    do not have the base GSI's platform key (LineageOS 23.2 builds are signed by
+    crDroid; MisterZtr's by himself). A re-signed SystemUI no longer shares a
+    signer with the platform, so every one of its ~155 signature-protected
+    permissions -- STATUS_BAR_SERVICE, ACCESS_SURFACE_FLINGER,
+    CONTROL_DISPLAY_BRIGHTNESS, ... -- is denied. It boots, then does nothing.
+
+    WHAT IS *NOT* THE PROBLEM. The sharedUserId failure that makes TrebleApp
+    fatal does not apply here. com.android.systemui declares
+    sharedUserId="android.uid.systemui", NOT android.uid.system, and it is the
+    SOLE member of that shared UID (verified on-device: appId 10127, one
+    package; android.uid.system has 19). In ReconcilePackageUtils the
+    IllegalStateException only fires when SharedUserSetting.signaturesChanged is
+    non-null, and that field is transient -- null at every boot. With one member
+    the first scan instead takes the tolerated branch and adopts the new
+    signature, logging "System package ... signature changed; retaining data".
+
+    THE FIX. shouldGrantPermissionBySignature is the single gate for
+    signature-protected grants (the sibling gate, mayGrantByPrivileged, comes
+    from the priv-app allowlist and is signature-independent). Return true early
+    for the packages we re-signed, and let every other package fall through to
+    the stock certificate comparison untouched.
+
+    Android 16 has only the new permission engine -- there is no legacy
+    PermissionManagerServiceImpl in services.jar to patch as well (checked).
+    The class also survives jarjar with its name intact.
+
+    Signature, from the decompiled A16 services.jar:
+        .method public final shouldGrantPermissionBySignature(
+            Lcom/android/server/permission/access/MutateStateScope;
+            Lcom/android/server/pm/pkg/PackageState;
+            Lcom/android/server/permission/access/permission/Permission;)Z
+        .locals 8
+    so p2 is the requesting PackageState. v0/v1 are safe to clobber at method
+    entry: the stock body's first act is to write v0.
+    """
+    pkgs = resigned_packages()
+    if not pkgs:
+        return
+
+    lines = ['invoke-interface {p2}, Lcom/android/server/pm/pkg/PackageState;->'
+             'getPackageName()Ljava/lang/String;',
+             'move-result-object v0']
+    for i, pkg in enumerate(pkgs):
+        lines += [
+            f'const-string v1, "{pkg}"',
+            'invoke-virtual {v0, v1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z',
+            'move-result v1',
+            f'if-eqz v1, :a9_sig_next_{i}',
+            'const/4 v0, 0x1',
+            'return v0',
+            f':a9_sig_next_{i}',
+        ]
+
+    method.first_instruction.next.expand_before(lines)
+    logging.info(f"AppIdPermissionPolicy: signature permissions forced for {pkgs}")
+
+
+def add_signer_to_mac_permissions():
+    """Keep a re-signed system app in the platform SELinux domain.
+
+    seapp_contexts assigns an app's SELinux domain partly from its seinfo, and
+    seinfo comes from matching the APK's signing certificate against
+    /system/etc/selinux/plat_mac_permissions.xml. Re-signed with our key,
+    SystemUI would no longer match the platform signer and would drop from
+    platform_app to priv_app -- a different domain with a different set of
+    allowed operations. Granting the permissions in the permission engine does
+    not help with that; SELinux is a separate check.
+
+    So add our certificate as an additional signer with seinfo="platform".
+    Entries are the DER form of the certificate as lowercase hex. A PEM file is
+    just base64-wrapped DER, so decode it here rather than shelling out to
+    openssl -- which is not on PATH on every host that runs this (NixOS).
+    """
+    if not resigned_packages():
+        return
+
+    cert = os.environ.get("A9_SIGN_CERT", "../platform.x509.pem")
+    path = "d/system/etc/selinux/plat_mac_permissions.xml"
+
+    with open(cert) as fh:
+        pem = fh.read()
+    body = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+                     pem, re.S)
+    assert body, f"not a PEM certificate: {cert}"
+    signature = base64.b64decode("".join(body.group(1).split())).hex()
+
+    with open(path) as fh:
+        content = fh.read()
+
+    if signature in content:
+        logging.info("plat_mac_permissions.xml: signer already present")
+        return
+
+    assert "</policy>" in content, "plat_mac_permissions.xml: no </policy>"
+    content = content.replace(
+        "</policy>",
+        f'<signer signature="{signature}"><seinfo value="platform"/></signer></policy>',
+        1)
+
+    with open(path, "w") as fh:
+        fh.write(content)
+    logging.info(f"plat_mac_permissions.xml: added platform signer {signature[:32]}...")
 
 
 def patch_services_jar():
@@ -908,6 +1035,20 @@ def patch_services_jar():
     JarPatcher(
         "d/system/framework/services.jar",
         [
+            # Only present when something is actually re-signed; resigned_packages()
+            # returns [] otherwise and the action becomes a no-op. Empty
+            # file_patterns marks the group as deliberately disabled so it is not
+            # reported as ZERO-MATCH.
+            FilePatch(
+                file_patterns = ([r"AppIdPermissionPolicy\.smali"]
+                                 if resigned_packages() else []),
+                patches = [
+                    InstructionPatch(
+                        method = "shouldGrantPermissionBySignature",
+                        action = patch_AppIdPermissionPolicy
+                    ),
+                ]
+            ),
             FilePatch(
                 file_patterns = [r"PhoneWindowManager\.smali"],
                 patches = [
@@ -1666,6 +1807,16 @@ def main():
         logging.error(f"File not found: {src_file}")
         exit_now(1)
 
+    # Re-signing without the permission-engine patch produces an image that
+    # BOOTS and then quietly misbehaves: SystemUI comes up with none of its
+    # ~155 signature permissions. Fail loudly instead -- a silent half-patch is
+    # exactly the kind of thing that costs an evening to diagnose.
+    if resigned_packages() and os.environ.get("A9_PATCH_SERVICES", "1") != "1":
+        logging.error("A9_PATCH_SYSTEMUI/A9_PATCH_DIALER re-sign packages, which "
+                      "REQUIRES the AppIdPermissionPolicy patch in services.jar. "
+                      "Refusing to build with A9_PATCH_SERVICES=0.")
+        exit_now(1)
+
     if not os.path.exists("TMP"):
         os.makedirs("TMP")
     os.chdir("TMP")
@@ -1739,6 +1890,11 @@ def main():
             patch_systemui()
         else:
             logging.warning("SKIPPING SystemUI patches (set A9_PATCH_SYSTEMUI=1 to enable)")
+
+        # Must run whenever anything was re-signed, and must run REGARDLESS of
+        # A9_PATCH_SERVICES: the SELinux domain is decided by this file alone.
+        # (The matching permission-engine patch lives in patch_services_jar.)
+        add_signer_to_mac_permissions()
 
         # A9_PATCH_SERVICES=0 reproduces the pre-2024-08 "shell script" setup:
         # build.prop + vndk.rc + a9_eink_server + a9service.apk only, with a

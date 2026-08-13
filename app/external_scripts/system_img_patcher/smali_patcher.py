@@ -14,6 +14,26 @@ from enum import Enum, auto
 # fired, so patches that silently stopped matching are visible at the end.
 PATCH_REPORT = []
 
+# Key used to re-sign any APK patched with sign=True. Paths are relative to the
+# TMP working directory, hence the "../".
+#
+# The default is the AOSP platform TEST key, which ships in this repo. Historically
+# that was the only workable choice: the patched APK had to keep matching the base
+# GSI's platform certificate, so the base had to be testkey-signed too.
+#
+# That constraint is gone. A9_PATCH_SYSTEMUI now pairs the re-sign with a
+# services.jar patch (patch_AppIdPermissionPolicy) that grants the re-signed
+# package its signature permissions BY PACKAGE NAME rather than by certificate,
+# so SystemUI can be signed with a key of our own on ANY base.
+#
+# Prefer a private key. The AOSP test key's PRIVATE half is published in AOSP, so
+# once its certificate is entered into plat_mac_permissions.xml with
+# seinfo="platform" (which the re-sign path now requires, see
+# add_signer_to_mac_permissions), ANY APK on the internet signed with that key
+# would land in the platform SELinux domain.
+SIGN_KEY = os.environ.get("A9_SIGN_KEY", "../platform.pk8")
+SIGN_CERT = os.environ.get("A9_SIGN_CERT", "../platform.x509.pem")
+
 class MatchStrategy(Enum):
     ANY = auto()
     EXACT = auto()
@@ -201,7 +221,7 @@ class JarPatcher:
             logging.warning("Failed to align the apk, to use it ensure zipalign is in PATH.")
 
         if sign:
-            run_command(f"apksigner sign --key ../platform.pk8 --cert ../platform.x509.pem {temp_apk_name}")
+            run_command(f"apksigner sign --key {SIGN_KEY} --cert {SIGN_CERT} {temp_apk_name}")
 
 
         shutil.move(temp_apk_name, self.target_file)
